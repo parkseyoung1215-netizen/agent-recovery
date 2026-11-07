@@ -1,0 +1,43 @@
+{
+  "name": "실험 3 - 메일 50건 일괄 발송 (33번째 실패)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "c1b2c3d4-0001-4000-8000-000000000001",
+      "name": "수동 실행",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = [];\nfor (let i = 1; i <= 50; i++) {\n  items.push({ json: { order_id: `order-${i}`, to: `customer${i}@example.com` } });\n}\nreturn items;"
+      },
+      "id": "c1b2c3d4-0002-4000-8000-000000000002",
+      "name": "고객 50명",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8000/email",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ order_id: $json.order_id, to: $json.to }) }}",
+        "options": {}
+      },
+      "id": "c1b2c3d4-0003-4000-8000-000000000003",
+      "name": "주문 확인 메일 발송",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 0]
+    }
+  ],
+  "connections": {
+    "수동 실행": { "main": [[{ "node": "고객 50명", "type": "main", "index": 0 }]] },
+    "고객 50명": { "main": [[{ "node": "주문 확인 메일 발송", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" }
+}
