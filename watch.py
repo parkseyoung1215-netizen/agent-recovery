@@ -72,14 +72,11 @@ def build(ex_id, key):
 
 def execute(plan):
     """승인된 계획 실행. 보내기 직전에 한 번 더 확인."""
-    parsed = urllib.parse.urlparse(plan["url"])
-    check_base = f"{parsed.scheme}://{parsed.netloc}/check{parsed.path}"
     sent = skipped = failed = 0
     for x in plan["plan"]:
         if x["status"] != "다시 보내야 함":
             continue
-        code, res = recover.http("GET", f"{check_base}?{urllib.parse.urlencode({plan['field']: x['id']})}")
-        if code == 200 and res.get("exists"):
+        if recover.lookup(plan["service"], x["id"]) is True:
             skipped += 1
             plan["results"].append(f"{x['id']}: 그사이 이미 처리됨 → 건너뜀")
             continue

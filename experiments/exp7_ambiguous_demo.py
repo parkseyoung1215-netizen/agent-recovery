@@ -30,7 +30,9 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-from recover import decide
+import os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from recover import decide  # noqa: E402
 
 SHOP = "http://127.0.0.1:8000"
 CUSTOMERS = [f"customer{i}@example.com" for i in range(1, 51)]

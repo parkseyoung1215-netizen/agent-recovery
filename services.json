@@ -1,0 +1,41 @@
+{
+  "_설명": "n8n이 요청을 보내는 주소(match)마다, 그 요청이 '이미 처리됐는지' 확인하는 방법을 적어요. {id}는 항목의 식별값(id_field)으로 바뀌고, ${이름}은 .env 파일이나 환경변수 값으로 바뀌어요(비밀값은 여기 적지 말 것). lookup_mode: strong = 기록이 바로 조회됨, eventual = 늦게 반영될 수 있음(settle_seconds 동안은 '없음'을 믿지 않음). 진짜 서비스를 붙일 때는 이 목록에 한 줄 추가하면 돼요.",
+  "services": [
+    {
+      "name": "가짜 쇼핑몰 - 결제",
+      "match": "http://127.0.0.1:8000/pay",
+      "id_field": "order_id",
+      "lookup": "http://127.0.0.1:8000/check/pay?order_id={id}",
+      "exists": "exists",
+      "lookup_mode": "eventual",
+      "settle_seconds": 30
+    },
+    {
+      "name": "가짜 쇼핑몰 - 재고",
+      "match": "http://127.0.0.1:8000/inventory",
+      "id_field": "order_id",
+      "lookup": "http://127.0.0.1:8000/check/inventory?order_id={id}",
+      "exists": "exists",
+      "lookup_mode": "eventual",
+      "settle_seconds": 30
+    },
+    {
+      "name": "가짜 쇼핑몰 - 배송",
+      "match": "http://127.0.0.1:8000/ship",
+      "id_field": "order_id",
+      "lookup": "http://127.0.0.1:8000/check/ship?order_id={id}",
+      "exists": "exists",
+      "lookup_mode": "eventual",
+      "settle_seconds": 30
+    },
+    {
+      "name": "가짜 메일 서비스",
+      "match": "http://127.0.0.1:8000/email",
+      "id_field": "to",
+      "lookup": "http://127.0.0.1:8000/check/email?to={id}",
+      "exists": "exists",
+      "lookup_mode": "eventual",
+      "settle_seconds": 30
+    }
+  ]
+}

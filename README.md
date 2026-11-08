@@ -47,14 +47,35 @@ echo "N8N_API_KEY=your-read-only-key" > .env
 python3 experiments/fake_shop.py      # fake shop / mail API on 127.0.0.1:8000
 # import experiments/*.json into n8n, then open 127.0.0.1:8000/scenario/3 to pick a scenario
 
-python3 check.py                       # find risky settings
-python3 watch.py                       # watch for failures, approve at 127.0.0.1:8100
-python3 recover.py <execution-id>      # or recover one execution by hand
+python3 ar.py check                   # find risky settings before anything fails
+python3 ar.py watch                   # watch for failures, approve at 127.0.0.1:8100
+python3 ar.py list                    # recent failed executions
+python3 ar.py recover <execution-id>  # recover one execution by hand
+python3 ar.py services                # which services it knows how to check
 
 python3 experiments/agent_checkout_demo.py   # AI assistant payment experiment (no n8n)
 python3 experiments/exp6_no_lookup_demo.py   # service without a lookup (simulated n8n behavior)
 python3 experiments/exp7_ambiguous_demo.py   # 503 vs committed-but-timed-out, with a lagging lookup
 ```
+
+### Adding a service
+
+`services.json` says, for each URL your workflows send to, how to ask "was this item already processed?":
+
+```json
+{
+  "name": "My mail API",
+  "match": "https://api.example.com/send",
+  "id_field": "to",
+  "lookup": "https://api.example.com/messages?to={id}",
+  "headers": {"Authorization": "Bearer ${MAIL_API_TOKEN}"},
+  "exists": "data.found",
+  "lookup_mode": "eventual",
+  "settle_seconds": 30
+}
+```
+
+`{id}` becomes the item's value of `id_field`, `${NAME}` is read from `.env` (keep secrets out of this file), and `exists` is the path to a true/false value in the lookup's JSON. A service without a `lookup` is never re-sent automatically; its items go to a human.
 
 `benchmark/` is an earlier simulation comparing three recovery strategies on 24 synthetic failure cases. I wrote the cases and the strategies myself, so its 24/24 score only shows the comparison set-up works; it is not evidence of real-world accuracy.
 

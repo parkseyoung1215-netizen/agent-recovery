@@ -33,7 +33,54 @@ HERE = Path(__file__).parent
 N8N_URL = os.environ.get("N8N_URL", "http://127.0.0.1:5678")
 
 # 요청 경로 → 조회할 때 쓰는 필드 (가짜 쇼핑몰 기준)
-CHECK_FIELD = {"/pay": "order_id", "/inventory": "order_id", "/ship": "order_id", "/email": "to"}
+SERVICES_FILE = HERE / "services.json"
+
+
+def load_services():
+    """services.json: 어떤 주소로 보내는 요청을, 어떤 방법으로 '이미 처리됐는지' 확인할지 적어둔 설정"""
+    if not SERVICES_FILE.exists():
+        return []
+    return json.loads(SERVICES_FILE.read_text(encoding="utf-8")).get("services", [])
+
+
+def find_service(url):
+    for svc in load_services():
+        if url.startswith(svc["match"]):
+            return svc
+    return None
+
+
+def _env(text):
+    """설정 안의 ${이름}을 환경변수(.env 포함) 값으로 바꿈. 비밀값을 설정 파일에 적지 않기 위해."""
+    def rep(m):
+        return os.environ.get(m.group(1)) or read_env_file().get(m.group(1), "")
+    return re.sub(r"\$\{(\w+)\}", rep, text)
+
+
+def read_env_file():
+    env = HERE / ".env"
+    out = {}
+    if env.exists():
+        for line in env.read_text().splitlines():
+            if "=" in line and not line.strip().startswith("#"):
+                k, v = line.split("=", 1)
+                out[k.strip()] = v.strip()
+    return out
+
+
+def lookup(svc, ident):
+    """True = 이미 처리됨, False = 없음, None = 확인 불가"""
+    if not svc or not svc.get("lookup"):
+        return None
+    url = _env(svc["lookup"]).replace("{id}", urllib.parse.quote(str(ident), safe=""))
+    headers = {k: _env(v) for k, v in (svc.get("headers") or {}).items()}
+    code, res = http("GET", url, headers=headers)
+    if code != 200:
+        return None
+    value = res
+    for part in svc.get("exists", "exists").split("."):
+        value = value.get(part) if isinstance(value, dict) else None
+    return bool(value)
 
 
 def load_api_key():
@@ -150,10 +197,12 @@ def make_plan(execution, workflow, min_age=0):
     p = node["parameters"]
     url = p["url"]
     parsed = urllib.parse.urlparse(url)
-    field = CHECK_FIELD.get(parsed.path)
-    if not field:
-        sys.exit(f"이 주소({parsed.path})는 처리 여부를 조회하는 방법을 아직 몰라요.")
-    check_base = f"{parsed.scheme}://{parsed.netloc}/check{parsed.path}"
+    svc = find_service(url)
+    if not svc:
+        sys.exit(f"이 주소({url})는 services.json에 없어서 처리 여부를 확인하는 방법을 몰라요.")
+    field = svc["id_field"]
+    mode = svc.get("lookup_mode", LOOKUP_MODE)
+    settle = svc.get("settle_seconds", SETTLE_SECONDS)
 
     downstream = [c["node"] for outs in workflow["connections"].get(failed_name, {}).get("main", []) for c in outs]
     age = max(seconds_since(execution.get("stoppedAt")), min_age)
@@ -163,12 +212,12 @@ def make_plan(execution, workflow, min_age=0):
     for i, it in enumerate(items):
         body = build_body(p.get("jsonBody"), it["json"], i, rd["runData"])
         ident = body.get(field)
-        code, res = http("GET", f"{check_base}?{urllib.parse.urlencode({field: ident})}")
-        found = res.get("exists") if code == 200 else None
-        status = decide(failure, found, age)
+        found = lookup(svc, ident)
+        status = decide(failure, found, age, lookup_mode=mode, settle=settle)
         plan.append({"index": i, "id": ident, "body": body, "status": status,
                      "key": f"{parsed.path.strip('/')}-{ident}"})
     return {"node": failed_name, "url": url, "method": p.get("method", "GET"), "field": field,
+            "service": svc, "settle": settle,
             "error": (rd.get("error") or {}).get("message"), "plan": plan, "downstream": downstream}
 
 
@@ -185,7 +234,7 @@ def show(plan):
     if unknown:
         print(f"  확인 불가       {len(unknown):>3}개  → 안전을 위해 보내지 않음 (사람이 확인 필요)")
     if waiting:
-        print(f"  확인 대기       {len(waiting):>3}개  → 기록이 늦게 반영될 수 있어 {SETTLE_SECONDS}초 뒤 다시 조회해야 함")
+        print(f"  확인 대기       {len(waiting):>3}개  → 기록이 늦게 반영될 수 있어 {plan['settle']}초 뒤 다시 조회해야 함")
     for x in todo[:10]:
         print(f"    - {plan['field']}={x['id']}")
     print(f"\n참고: n8n 기본 Retry였다면 {len(plan['plan'])}건을 전부 다시 보냈을 거예요.")
