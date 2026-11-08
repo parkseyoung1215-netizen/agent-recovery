@@ -28,6 +28,7 @@ POLL_SECONDS = int(__import__("os").environ.get("POLL", "10"))
 lock = threading.Lock()
 plans = {}          # 실행ID → 계획
 seen = set()        # 이미 본 실패 실행ID
+first_seen = {}     # 실행ID → 처음 발견한 시각 (n8n 기록에 종료 시각이 없을 때 대신 씀)
 
 
 def notify(title, text):
@@ -48,9 +49,17 @@ def build(ex_id, key):
     try:
         execution = recover.n8n(f"/executions/{ex_id}?includeData=true", key)
         workflow = recover.n8n(f"/workflows/{execution['workflowId']}", key)
-        plan = recover.make_plan(execution, workflow)
+        plan = recover.make_plan(execution, workflow, min_age=time.time() - first_seen.get(ex_id, time.time()))
         plan["workflow"] = workflow.get("name", execution["workflowId"])
-        plan["status"] = "승인 대기" if any(x["status"] == "다시 보내야 함" for x in plan["plan"]) else "복구 필요 없음"
+        statuses = {x["status"] for x in plan["plan"]}
+        if "다시 보내야 함" in statuses:
+            plan["status"] = "승인 대기"
+        elif "확인 대기" in statuses:
+            plan["status"] = "확인 대기"       # 조회 결과가 늦게 반영될 수 있어 잠시 뒤 다시 확인
+        elif "확인 불가" in statuses:
+            plan["status"] = "사람 확인 필요"
+        else:
+            plan["status"] = "복구 필요 없음"
     except SystemExit as e:               # recover.py는 문제가 있으면 sys.exit으로 이유를 알려줌
         plan = {"workflow": "?", "node": "?", "status": "자동 복구 불가", "reason": str(e), "plan": []}
     except Exception as e:
@@ -88,10 +97,21 @@ def execute(plan):
 def poll_loop(key):
     while True:
         try:
+            with lock:
+                waiting = [i for i, p in plans.items() if p["status"] == "확인 대기"]
+            for ex_id in waiting:                      # 기다린 뒤 다시 조회해서 계획 갱신
+                plan = build(ex_id, key)
+                with lock:
+                    plans[ex_id] = plan
+                if plan["status"] != "확인 대기":
+                    print(f"[{datetime.now():%H:%M:%S}] 실행 {ex_id} 다시 확인 → {plan['status']}")
+                    if plan["status"] == "승인 대기":
+                        notify("Agent Recovery", f"{plan['workflow']}: 복구 승인 필요")
             for ex_id in failed_execution_ids(key):
                 if ex_id in seen:
                     continue
                 seen.add(ex_id)
+                first_seen[ex_id] = time.time()
                 plan = build(ex_id, key)
                 with lock:
                     plans[ex_id] = plan

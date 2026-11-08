@@ -95,8 +95,48 @@ def output_items(run_data, node):
     return []
 
 
+def seconds_since(iso):
+    from datetime import datetime, timezone
+    if not iso:
+        return 0
+    try:
+        t = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        return (datetime.now(timezone.utc) - t).total_seconds()
+    except ValueError:
+        return 0
+
+
+# ---------- 다시 보내도 되는지 판단 (v0.2) ----------
+# community.n8n.io의 지적을 반영: 타임아웃, 503, 타임아웃 직후의 "없음"은
+# '아무것도 안 써졌다'는 증거가 아니다. 그래서 '없음'을 믿기 전에 기다리는 시간을 둔다.
+LOOKUP_MODE = os.environ.get("LOOKUP_MODE", "eventual")   # strong: 기록이 즉시 조회됨 / eventual: 늦게 반영될 수 있음
+SETTLE_SECONDS = int(os.environ.get("SETTLE_SECONDS", "30"))
+
+
+def decide(failure, found, age_seconds, lookup_mode=None, settle=None):
+    """항목 하나를 어떻게 할지 정한다.
+
+    failure: "rejected" (상대가 에러 응답을 줌, 예: 503) / "timeout" (응답을 못 받음) / "unknown"
+    found:   조회 결과 True(있음) / False(없음) / None(조회 불가)
+    """
+    lookup_mode = lookup_mode or LOOKUP_MODE
+    settle = SETTLE_SECONDS if settle is None else settle
+    if found is True:
+        return "이미 처리됨"
+    if found is None:
+        return "확인 불가"
+    # 조회 결과가 '없음'일 때
+    if lookup_mode == "strong" and failure == "rejected":
+        return "다시 보내야 함"
+    # 타임아웃(요청이 아직 처리 중일 수 있음)이거나, 조회가 늦게 반영되는 서비스면
+    # 충분히 기다린 뒤의 '없음'만 믿는다
+    if age_seconds >= settle:
+        return "다시 보내야 함"
+    return "확인 대기"
+
+
 # ---------- 복구 계획 ----------
-def make_plan(execution, workflow):
+def make_plan(execution, workflow, min_age=0):
     rd = execution["data"]["resultData"]
     failed_name = rd.get("lastNodeExecuted")
     nodes = {n["name"]: n for n in workflow["nodes"]}
@@ -116,15 +156,16 @@ def make_plan(execution, workflow):
     check_base = f"{parsed.scheme}://{parsed.netloc}/check{parsed.path}"
 
     downstream = [c["node"] for outs in workflow["connections"].get(failed_name, {}).get("main", []) for c in outs]
+    age = max(seconds_since(execution.get("stoppedAt")), min_age)
+    # 노드 전체가 실패한 경우 n8n은 항목별 실패 이유를 남기지 않아서 "unknown"으로 본다
+    failure = "unknown"
     plan = []
     for i, it in enumerate(items):
         body = build_body(p.get("jsonBody"), it["json"], i, rd["runData"])
         ident = body.get(field)
         code, res = http("GET", f"{check_base}?{urllib.parse.urlencode({field: ident})}")
-        if code != 200:
-            status = "확인 불가"
-        else:
-            status = "이미 처리됨" if res.get("exists") else "다시 보내야 함"
+        found = res.get("exists") if code == 200 else None
+        status = decide(failure, found, age)
         plan.append({"index": i, "id": ident, "body": body, "status": status,
                      "key": f"{parsed.path.strip('/')}-{ident}"})
     return {"node": failed_name, "url": url, "method": p.get("method", "GET"), "field": field,
@@ -135,6 +176,7 @@ def show(plan):
     done = [x for x in plan["plan"] if x["status"] == "이미 처리됨"]
     todo = [x for x in plan["plan"] if x["status"] == "다시 보내야 함"]
     unknown = [x for x in plan["plan"] if x["status"] == "확인 불가"]
+    waiting = [x for x in plan["plan"] if x["status"] == "확인 대기"]
     print(f"\n실패한 노드: {plan['node']}  ({plan['method']} {plan['url']})")
     print(f"n8n 에러: {plan['error']}")
     print(f"항목 {len(plan['plan'])}개를 하나씩 조회한 결과:")
@@ -142,6 +184,8 @@ def show(plan):
     print(f"  다시 보내야 함  {len(todo):>3}개  → 중복 방지 키를 붙여서 보냄")
     if unknown:
         print(f"  확인 불가       {len(unknown):>3}개  → 안전을 위해 보내지 않음 (사람이 확인 필요)")
+    if waiting:
+        print(f"  확인 대기       {len(waiting):>3}개  → 기록이 늦게 반영될 수 있어 {SETTLE_SECONDS}초 뒤 다시 조회해야 함")
     for x in todo[:10]:
         print(f"    - {plan['field']}={x['id']}")
     print(f"\n참고: n8n 기본 Retry였다면 {len(plan['plan'])}건을 전부 다시 보냈을 거예요.")

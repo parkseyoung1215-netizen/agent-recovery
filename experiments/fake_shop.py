@@ -16,7 +16,7 @@
 import json
 import time
 from datetime import datetime
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = 8000
 SCENARIOS = {
@@ -26,6 +26,8 @@ SCENARIOS = {
     4: "결제는 처리되지만 응답이 10초 늦음 (AI 비서 결제 실험)",
     5: "결제 서버가 1번 503 (처리 안 됨, AI 비서 결제 실험)",
     6: "메일 50건 중 33번째 1번 503 + 조회 기능 없음 (중복 방지 키만 지원)",
+    7: "메일 50건: customer10은 503(안 보냄), customer20은 보냈지만 응답 6초 늦음 + 조회가 8초 늦게 반영",
+    8: "메일 50건: customer10은 503(안 보냄), customer20은 보냈지만 응답 6초 늦음 + 조회는 바로 반영",
 }
 
 state = {}
@@ -47,6 +49,11 @@ def reset(scenario=1):
         "pay_failures_left": 1 if scenario == 5 else 0,
         "email_requests": 0,
         "seen_keys": {},
+        # 실험 7, 8: 항목별로 다른 실패
+        "email_reject_once": {"customer10@example.com"} if scenario in (7, 8) else set(),
+        "email_slow_once": {"customer20@example.com"} if scenario in (7, 8) else set(),
+        "email_slow_seconds": 6,
+        "lookup_lag_seconds": 8 if scenario == 7 else 0,
     })
 
 
@@ -123,7 +130,9 @@ class Handler(BaseHTTPRequestHandler):
             value = q.get(field)
             if not value:
                 return self._send(400, {"error": f"{field}가 필요함"})
-            found = [r for r in state[rows_name] if r.get(field) == value]
+            lag = state.get("lookup_lag_seconds", 0)      # 기록이 조회에 늦게 반영되는 서비스 흉내
+            found = [r for r in state[rows_name] if r.get(field) == value
+                     and time.time() - r.get("ts", 0) >= lag]
             return self._send(200, {"exists": bool(found), "count": len(found)})
         if self.path.startswith("/reset"):
             reset(state.get("scenario", 1))
@@ -178,8 +187,17 @@ class Handler(BaseHTTPRequestHandler):
             if state["email_fail_at"] and state["email_requests"] == state["email_fail_at"]:
                 return self._send(503, {"error": "Service Unavailable: 메일 서버 일시 장애"})
             to = body.get("to") or order_id
-            state["emails"].append({"to": to, "order_id": order_id, "at": now})
+            if to in state["email_reject_once"]:
+                state["email_reject_once"].discard(to)
+                return self._send(503, {"error": "Service Unavailable: 메일 서버 일시 장애"})
+            state["emails"].append({"to": to, "order_id": order_id, "at": now, "ts": time.time()})
             result = {"ok": True, "step": "메일", "to": to}
+            if to in state["email_slow_once"]:
+                state["email_slow_once"].discard(to)
+                if key:
+                    state["seen_keys"][key] = result
+                time.sleep(state["email_slow_seconds"])   # 보내긴 했지만 응답이 늦음
+                return self._send(200, result)
         else:
             return self._send(404, {"error": "없는 주소"})
 
@@ -191,4 +209,4 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     reset(1)
     print(f"가짜 쇼핑몰 실행 중: http://127.0.0.1:{PORT}/state  (끄려면 Ctrl + C)")
-    HTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
