@@ -126,6 +126,55 @@ class Claims(unittest.TestCase):
         self.assertEqual(recover.claim_state(job), "sending")
 
 
+class RestartAfterSending(unittest.TestCase):
+    """작업자가 'sending'을 기록하고 결과를 남기기 전에 재시작되면, 다시 보내지 않고 사람에게 넘겨야 한다.
+    (Clearwork Desk 제안. 주의: 잠금 파일은 같은 컴퓨터·같은 폴더를 쓰는 작업자끼리만 효과가 있음)"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        recover.STATE_DIR = Path(self.tmp.name) / "claims"
+        self.sent = []
+        recover_http = recover.http
+
+        def fake_http(method, url, body=None, headers=None, timeout=15):
+            if method == "POST":
+                self.sent.append(body)
+                return 200, {}
+            return 200, {"exists": False}      # 조회는 '없음' (아직 반영 안 됨)
+        recover.http = fake_http
+        self.addCleanup(setattr, recover, "http", recover_http)
+        self.addCleanup(recover.find_service.__globals__.__setitem__, "find_service", recover.find_service)
+        recover.find_service.__globals__["find_service"] = lambda url: {
+            "id_field": "to", "lookup": "http://x/check?to={id}", "exists": "exists",
+            "lookup_mode": "strong", "settle_seconds": 0}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _execution(self):
+        items = [{"json": {"to": "customer20@example.com"}}]
+        return {"id": "77", "stoppedAt": "2000-01-01T00:00:00Z", "data": {"resultData": {
+            "lastNodeExecuted": "send", "error": {"message": "timeout"},
+            "runData": {"src": [{"data": {"main": [items]}}], "send": [{"source": [{"previousNode": "src"}]}]}}}}
+
+    def _workflow(self):
+        return {"nodes": [{"name": "send", "type": "n8n-nodes-base.httpRequest", "parameters": {
+            "method": "POST", "url": "http://x/email", "jsonBody": "={{ JSON.stringify({ to: $json.to }) }}"}}],
+            "connections": {}}
+
+    def test_restarted_worker_does_not_resend_and_flags_for_human(self):
+        plan = recover.make_plan(self._execution(), self._workflow(), ex_id="77")
+        self.assertEqual(plan["plan"][0]["status"], "다시 보내야 함")
+        job = f"77:http://x/email:customer20@example.com"
+        recover.claim(job, worker="first")
+        recover.mark(job, "sending")             # 보냈을 수도 있는 순간에 재시작됐다고 가정
+        plan = recover.make_plan(self._execution(), self._workflow(), ex_id="77")
+        self.assertEqual(plan["plan"][0]["status"], "확인 불가")
+        self.assertIn("sending", plan["plan"][0]["note"])
+        r = recover.send_items([x for x in plan["plan"] if x["status"] == "다시 보내야 함"], plan, "77")
+        self.assertEqual((r["sent"], self.sent), (0, []))
+
+
 class FakeShopIntegration(unittest.TestCase):
     """실험 7 상황: customer10은 503(안 써짐), customer20은 써졌지만 타임아웃, 조회는 8초 늦게 반영."""
 

@@ -251,7 +251,7 @@ def send_items(todo, plan, ex_id, worker="cli"):
 
 
 # ---------- 복구 계획 ----------
-def make_plan(execution, workflow, min_age=0):
+def make_plan(execution, workflow, min_age=0, ex_id=None):
     rd = execution["data"]["resultData"]
     failed_name = rd.get("lastNodeExecuted")
     nodes = {n["name"]: n for n in workflow["nodes"]}
@@ -283,7 +283,14 @@ def make_plan(execution, workflow, min_age=0):
         found = lookup(svc, ident)
         status = decide(failure, found, age, lookup_mode=mode, settle=settle,
                         keyed_first_attempt=bool(svc.get("idempotent_first_attempt")))
-        plan.append({"index": i, "id": ident, "body": body, "status": status,
+        # 이전 복구 시도의 기록이 남아 있으면(예: 'sending'에서 멈춤) 다시 보내지 않고 사람에게
+        prior = claim_state(f"{ex_id or execution.get('id')}:{url}:{ident}")
+        if prior and status != "이미 처리됨":
+            status = "확인 불가"
+            note = f"이전 복구 기록이 '{prior}' 상태로 남아 있음"
+        else:
+            note = None
+        plan.append({"index": i, "id": ident, "body": body, "status": status, "note": note,
                      "key": f"{parsed.path.strip('/')}-{ident}"})
     return {"node": failed_name, "url": url, "method": p.get("method", "GET"), "field": field,
             "service": svc, "settle": settle,
@@ -302,6 +309,9 @@ def show(plan):
     print(f"  다시 보내야 함  {len(todo):>3}개  → 보내기 전에 기록을 남기고 중복 방지 키를 붙여서 보냄")
     if unknown:
         print(f"  확인 불가       {len(unknown):>3}개  → 써졌는지 확신할 수 없어 보내지 않음 (사람이 확인 필요)")
+    for x in unknown:
+        if x.get("note"):
+            print(f"    - {plan['field']}={x['id']}: {x['note']}")
     if waiting:
         print(f"  확인 대기       {len(waiting):>3}개  → 기록이 늦게 반영될 수 있어 {plan['settle']}초 뒤 다시 조회해야 함")
     for x in todo[:10]:
@@ -337,7 +347,7 @@ def main():
     if execution.get("status") != "error":
         sys.exit(f"실행 {ex_id}는 실패한 실행이 아니에요 (상태: {execution.get('status')}).")
     workflow = n8n(f"/workflows/{execution['workflowId']}", key)
-    plan = make_plan(execution, workflow)
+    plan = make_plan(execution, workflow, ex_id=ex_id)
     todo = show(plan)
     if not todo:
         rest = [x for x in plan["plan"] if x["status"] != "이미 처리됨"]

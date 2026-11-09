@@ -95,6 +95,8 @@ Add `"idempotent_first_attempt": true` only if your workflow already sends the s
 - Recovery needs the target service to answer "was this processed?" (here, the fake shop's `/check`). Real services (Gmail, Google Sheets, Stripe…) are not connected yet.
 - Nodes after the failed node are not continued.
 - `lookup_mode` and `settle_seconds` are assumptions about each service. If a service is set to `strong` but its lookup actually lags, a duplicate is still possible (there is a test that shows this).
+- Claims are files in `.ar_state/` on one machine. Workers on different machines or containers don't share them, so this does not stop two separate hosts from sending the same item; that needs a shared store (for example a database row with a unique constraint).
+- An item whose previous recovery stopped at `sending` is never re-sent automatically; it is shown as unknown for a human.
 - With a lagging lookup and no idempotency key, the tool is safe but incomplete: items it can't prove are left for a human.
 - Per-item error output in n8n is not read yet; the experiment for it simulates n8n's behavior.
 - Experiments 4–8 were run outside n8n (simulated); experiments 1–3 and the tools were run on a real local n8n.

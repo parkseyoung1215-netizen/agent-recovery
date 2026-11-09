@@ -49,7 +49,7 @@ def build(ex_id, key):
     try:
         execution = recover.n8n(f"/executions/{ex_id}?includeData=true", key)
         workflow = recover.n8n(f"/workflows/{execution['workflowId']}", key)
-        plan = recover.make_plan(execution, workflow, min_age=time.time() - first_seen.get(ex_id, time.time()))
+        plan = recover.make_plan(execution, workflow, min_age=time.time() - first_seen.get(ex_id, time.time()), ex_id=ex_id)
         plan["workflow"] = workflow.get("name", execution["workflowId"])
         statuses = {x["status"] for x in plan["plan"]}
         if "다시 보내야 함" in statuses:
