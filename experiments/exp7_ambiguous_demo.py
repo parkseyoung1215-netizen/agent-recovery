@@ -14,7 +14,7 @@ n8n HTTP 노드의 '항목별 에러 출력(On Error: Continue using error outpu
 
 비교 대상:
   옛날 방식(v0.1): 조회해서 '없음'이면 바로 다시 보냄
-  새 방식(v0.2):   타임아웃이거나 조회가 늦게 반영될 수 있으면, 일정 시간이 지난 뒤의 '없음'만 믿음
+  새 방식(v0.3):   타임아웃이거나 조회가 늦게 반영될 수 있으면, 일정 시간이 지난 뒤의 '없음'만 믿음
 
 기대 결과 (sameday): 확실히 안 써진 항목만 다시 보낼 수 있고,
                    써졌는데 타임아웃 난 항목은 미해결(다시 보내지 않음)로 남아야 한다.
@@ -103,7 +103,7 @@ def main():
     print("| 실험 | 조회 반영 | 방식 | customer10 (503) | customer20 (타임아웃, 실제로는 보냄) | 총 발송 | 받은 사람 | 중복 |")
     print("|---|---|---|---|---|---|---|---|")
     for scenario, mode in ((7, "eventual"), (8, "strong")):
-        for method in ("v0.1", "v0.2"):
+        for method in ("v0.1", "v0.3"):
             rows, total, people, dup = run(scenario, mode, method)
             d = {name: f"{status}" for name, failure, status in rows}
             print(f"| {scenario} | {'8초 늦게' if mode == 'eventual' else '바로'} | {method} "

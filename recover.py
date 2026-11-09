@@ -80,7 +80,8 @@ def lookup(svc, ident):
     value = res
     for part in svc.get("exists", "exists").split("."):
         value = value.get(part) if isinstance(value, dict) else None
-    return bool(value)
+    # true/false가 아니면({}·"false"·null 등) 판단하지 않고 '확인 불가'로 둔다
+    return value if isinstance(value, bool) else None
 
 
 def load_api_key():
@@ -153,33 +154,100 @@ def seconds_since(iso):
         return 0
 
 
-# ---------- 다시 보내도 되는지 판단 (v0.2) ----------
-# community.n8n.io의 지적을 반영: 타임아웃, 503, 타임아웃 직후의 "없음"은
-# '아무것도 안 써졌다'는 증거가 아니다. 그래서 '없음'을 믿기 전에 기다리는 시간을 둔다.
+# ---------- 다시 보내도 되는지 판단 (v0.3) ----------
+# community.n8n.io 피드백 반영:
+#  - 타임아웃, 503, 타임아웃 직후의 "없음"은 '아무것도 안 써졌다'는 증거가 아니다.
+#  - 늦게 반영되는 조회(eventual)에서는 기다린 뒤의 "없음"도 '아직 안 보임'일 뿐이다.
+#  - 그래서 자동으로 다시 보내는 건 두 경우뿐:
+#    (a) 조회가 바로 반영되는(strong) 서비스가 "없음"이라고 확인했을 때
+#        (타임아웃이었다면 아직 처리 중일 수 있으니 settle_seconds가 지난 뒤)
+#    (b) 처음 보낼 때부터 같은 중복 방지 키를 붙였을 때 (서비스가 두 번째를 무시함)
+#  - 나머지는 사람에게 넘긴다.
 LOOKUP_MODE = os.environ.get("LOOKUP_MODE", "eventual")   # strong: 기록이 즉시 조회됨 / eventual: 늦게 반영될 수 있음
 SETTLE_SECONDS = int(os.environ.get("SETTLE_SECONDS", "30"))
 
 
-def decide(failure, found, age_seconds, lookup_mode=None, settle=None):
+def decide(failure, found, age_seconds, lookup_mode=None, settle=None, keyed_first_attempt=False):
     """항목 하나를 어떻게 할지 정한다.
 
     failure: "rejected" (상대가 에러 응답을 줌, 예: 503) / "timeout" (응답을 못 받음) / "unknown"
-    found:   조회 결과 True(있음) / False(없음) / None(조회 불가)
+    found:   조회 결과 True(있음) / False(없음) / None(조회 불가·이상한 응답)
+    keyed_first_attempt: 처음 요청에도 같은 Idempotency-Key를 붙였는가
     """
     lookup_mode = lookup_mode or LOOKUP_MODE
     settle = SETTLE_SECONDS if settle is None else settle
     if found is True:
         return "이미 처리됨"
+    if keyed_first_attempt:
+        return "다시 보내야 함"          # 서비스가 같은 키의 두 번째 요청을 무시해 줌
     if found is None:
         return "확인 불가"
-    # 조회 결과가 '없음'일 때
-    if lookup_mode == "strong" and failure == "rejected":
-        return "다시 보내야 함"
-    # 타임아웃(요청이 아직 처리 중일 수 있음)이거나, 조회가 늦게 반영되는 서비스면
-    # 충분히 기다린 뒤의 '없음'만 믿는다
-    if age_seconds >= settle:
-        return "다시 보내야 함"
-    return "확인 대기"
+    # 여기부터 조회 결과가 '없음'
+    if lookup_mode == "strong":
+        if failure == "rejected" or age_seconds >= settle:
+            return "다시 보내야 함"
+        return "확인 대기"              # 타임아웃 직후엔 요청이 아직 처리 중일 수 있음
+    # eventual: '없음'은 '아직 안 보임'일 수 있음
+    if age_seconds < settle:
+        return "확인 대기"
+    return "확인 불가"                  # 기다려도 확신할 수 없음 → 사람에게
+
+
+# ---------- 보내기 전 기록과 잠금 (체크포인트) ----------
+# 같은 항목을 두 작업자가 동시에 보내지 않도록, 보내기 '전에' 파일을 원자적으로 만들어 잡는다.
+# 보낸 뒤 기록하기 전에 멈추면 기록이 'sending'으로 남고, 다음에는 '확인 불가'로 사람에게 넘긴다.
+STATE_DIR = HERE / ".ar_state" / "claims"
+
+
+def _claim_path(job_key):
+    safe = re.sub(r"[^A-Za-z0-9._@-]", "_", job_key)
+    return STATE_DIR / f"{safe}.json"
+
+
+def claim(job_key, worker="cli"):
+    """이 항목을 내가 처리하겠다고 잡는다. 이미 누가 잡았거나 처리 기록이 있으면 False."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(_claim_path(job_key), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w") as f:
+        json.dump({"job": job_key, "worker": worker, "state": "claimed"}, f)
+    return True
+
+
+def mark(job_key, state, **extra):
+    p = _claim_path(job_key)
+    rec = json.loads(p.read_text()) if p.exists() else {"job": job_key}
+    rec.update(state=state, **extra)
+    p.write_text(json.dumps(rec, ensure_ascii=False))
+
+
+def claim_state(job_key):
+    p = _claim_path(job_key)
+    return json.loads(p.read_text()).get("state") if p.exists() else None
+
+
+def send_items(todo, plan, ex_id, worker="cli"):
+    """잡기 → 'sending' 기록 → 보내기 → 결과 기록. 실제로 보낸 건수를 정직하게 돌려준다."""
+    result = {"sent": 0, "failed": 0, "skipped_claimed": 0, "lines": []}
+    for x in todo:
+        job = f"{ex_id}:{plan['url']}:{x['id']}"
+        if not claim(job, worker):
+            result["skipped_claimed"] += 1
+            result["lines"].append(f"{x['id']}: 다른 작업자가 이미 잡았거나 처리 기록이 있음 ({claim_state(job)}) → 건너뜀")
+            continue
+        mark(job, "sending")
+        code, _ = http(plan["method"], plan["url"], body=x["body"], headers={"Idempotency-Key": x["key"]})
+        if isinstance(code, int) and 200 <= code < 300:
+            mark(job, "sent", code=code)
+            result["sent"] += 1
+            result["lines"].append(f"{x['id']}: 보냄")
+        else:
+            mark(job, "unknown", code=code)   # 응답이 실패여도 써졌을 수 있음 → 사람 확인
+            result["failed"] += 1
+            result["lines"].append(f"{x['id']}: 응답 {code} → 써졌는지 알 수 없음, 사람 확인 필요")
+    return result
 
 
 # ---------- 복구 계획 ----------
@@ -213,7 +281,8 @@ def make_plan(execution, workflow, min_age=0):
         body = build_body(p.get("jsonBody"), it["json"], i, rd["runData"])
         ident = body.get(field)
         found = lookup(svc, ident)
-        status = decide(failure, found, age, lookup_mode=mode, settle=settle)
+        status = decide(failure, found, age, lookup_mode=mode, settle=settle,
+                        keyed_first_attempt=bool(svc.get("idempotent_first_attempt")))
         plan.append({"index": i, "id": ident, "body": body, "status": status,
                      "key": f"{parsed.path.strip('/')}-{ident}"})
     return {"node": failed_name, "url": url, "method": p.get("method", "GET"), "field": field,
@@ -230,9 +299,9 @@ def show(plan):
     print(f"n8n 에러: {plan['error']}")
     print(f"항목 {len(plan['plan'])}개를 하나씩 조회한 결과:")
     print(f"  이미 처리됨     {len(done):>3}개  → 다시 보내지 않음")
-    print(f"  다시 보내야 함  {len(todo):>3}개  → 중복 방지 키를 붙여서 보냄")
+    print(f"  다시 보내야 함  {len(todo):>3}개  → 보내기 전에 기록을 남기고 중복 방지 키를 붙여서 보냄")
     if unknown:
-        print(f"  확인 불가       {len(unknown):>3}개  → 안전을 위해 보내지 않음 (사람이 확인 필요)")
+        print(f"  확인 불가       {len(unknown):>3}개  → 써졌는지 확신할 수 없어 보내지 않음 (사람이 확인 필요)")
     if waiting:
         print(f"  확인 대기       {len(waiting):>3}개  → 기록이 늦게 반영될 수 있어 {plan['settle']}초 뒤 다시 조회해야 함")
     for x in todo[:10]:
@@ -243,14 +312,12 @@ def show(plan):
     return todo
 
 
-def run(todo, plan):
-    ok = 0
-    for x in todo:
-        code, res = http(plan["method"], plan["url"], body=x["body"], headers={"Idempotency-Key": x["key"]})
-        mark = "OK" if 200 <= code < 300 else f"실패 {code}"
-        ok += 200 <= code < 300
-        print(f"  {plan['field']}={x['id']} → {mark}")
-    print(f"\n복구 완료: {ok}/{len(todo)}건 보냄, 중복으로 보낸 건 0건")
+def run(todo, plan, ex_id):
+    r = send_items(todo, plan, ex_id)
+    for line in r["lines"]:
+        print(f"  {line}")
+    print(f"\n보낸 요청: {r['sent']}건 성공, {r['failed']}건 응답 실패, {r['skipped_claimed']}건 건너뜀 (이미 잡힌 항목)")
+    print("실제로 중복이 없는지는 상대 서비스의 기록으로 확인하세요. 이 도구는 보낸 횟수만 셀 수 있어요.")
 
 
 def list_failed(key):
@@ -273,13 +340,17 @@ def main():
     plan = make_plan(execution, workflow)
     todo = show(plan)
     if not todo:
-        print("\n다시 보낼 게 없어요. 이 실패는 실제로는 이미 처리된 거예요. 끝!")
+        rest = [x for x in plan["plan"] if x["status"] != "이미 처리됨"]
+        if rest:
+            print(f"\n지금 자동으로 다시 보낼 건 없어요. {len(rest)}건은 확인 대기 또는 사람 확인이 필요해요.")
+        else:
+            print("\n다시 보낼 게 없어요. 모든 항목이 이미 처리된 걸로 확인됐어요.")
         return
     if "--yes" not in args:
         if input("\n위 계획대로 보낼까요? (y/n) ").strip().lower() != "y":
             print("취소했어요. 아무것도 보내지 않았어요.")
             return
-    run(todo, plan)
+    run(todo, plan, ex_id)
 
 
 if __name__ == "__main__":

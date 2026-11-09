@@ -71,8 +71,9 @@ def build(ex_id, key):
 
 
 def execute(plan):
-    """승인된 계획 실행. 보내기 직전에 한 번 더 확인."""
-    sent = skipped = failed = 0
+    """승인된 계획 실행. 보내기 직전에 한 번 더 확인하고, 잡기·기록은 recover.send_items가 맡음."""
+    todo = []
+    skipped = 0
     for x in plan["plan"]:
         if x["status"] != "다시 보내야 함":
             continue
@@ -80,15 +81,12 @@ def execute(plan):
             skipped += 1
             plan["results"].append(f"{x['id']}: 그사이 이미 처리됨 → 건너뜀")
             continue
-        code, _ = recover.http(plan["method"], plan["url"], body=x["body"], headers={"Idempotency-Key": x["key"]})
-        if 200 <= code < 300:
-            sent += 1
-            plan["results"].append(f"{x['id']}: 보냄")
-        else:
-            failed += 1
-            plan["results"].append(f"{x['id']}: 실패 ({code})")
-    plan["status"] = "복구 완료" if failed == 0 else "일부 실패"
-    plan["summary"] = f"보냄 {sent}건, 건너뜀 {skipped}건, 실패 {failed}건, 중복으로 보낸 건 0건"
+        todo.append(x)
+    r = recover.send_items(todo, plan, plan["id"], worker="watch")
+    plan["results"] += r["lines"]
+    plan["status"] = "복구 완료" if r["failed"] == 0 else "일부 확인 필요"
+    plan["summary"] = (f"보낸 요청 {r['sent']}건 성공, {r['failed']}건 응답 실패, "
+                       f"건너뜀 {skipped + r['skipped_claimed']}건. 실제 중복 여부는 상대 서비스 기록으로 확인하세요.")
 
 
 def poll_loop(key):
