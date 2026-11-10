@@ -88,6 +88,8 @@ On a real local n8n 2.46.6, with a 503 injected at request #33 of a 50-email wor
 | Retry On Fail (3 tries) | 100 | **fail**: 49 duplicates | success |
 | Retry On Fail + `Idempotency-Key: order-confirm-{{ $json.to }}` | 100 | **pass**: 49 safe retries | success |
 
+`chaos run` reproduced the last two rows from one command each: Retry On Fail without a key exited with **1** (49 duplicates), with the key it exited with **0**. In both runs n8n answered the webhook with 200.
+
 The last row passes only because the sink honors the key, the way a destination that supports idempotency keys would.
 
 Nothing real is sent during the test: every write goes to the sink. Requests that carry the same `Idempotency-Key` twice count as safe retries. Without a key, two identical writes count as a duplicate, which can be a false alarm if your workflow is meant to send the same thing twice.
