@@ -7,7 +7,7 @@ The first target is [n8n](https://n8n.io). The same idea is also tested on an AI
 
 ## What I found (self-hosted n8n, November 2026)
 
-All tests used a local fake shop / mail API so I could count exactly what happened on the other side.
+Most tests used a local fake shop / mail API so I could count exactly what happened on the other side; one used a real Google Sheet.
 
 | Situation | n8n built-in behavior | With Agent Recovery |
 |---|---|---|
@@ -17,6 +17,7 @@ All tests used a local fake shop / mail API so I could count exactly what happen
 | Shipping request processed, but reply arrives after the 5 s timeout | Retry ships again (**2 shipments**). Retry On Fail: **3 shipments**, still marked error | Sees it was already shipped, **sends nothing** |
 | AI assistant pays, reply is late (no n8n) | A typical retry loop **charged 3 times and told the user "payment failed"** | Checks first, **charged once**, reports "payment confirmed" |
 | One item gets 503 (not written), another is written but times out, and the lookup lags 8 s behind writes | v0.1 trusted the early "not found" and re-sent both: **1 duplicate** | v0.3 re-sends nothing automatically: the written item is found later, the 503 item goes to a human. **0 duplicates**, 1 email left for a human |
+| **Real Google Sheets** (via an Apps Script web app): 5 orders written, one reply delayed past the 5 s timeout | All 5 rows were in the sheet, but n8n marked the run failed; Retry wrote all 5 again: **5 duplicate rows**, still failed | Looked up each order in the sheet, found all 5, **sent nothing** |
 | Service has no "was this processed?" lookup | Retry: 49 duplicates | Recovery alone can't finish safely (1 email missing, handed to a human). **Adding an Idempotency-Key before the run** makes plain n8n Retry safe: 50 sent, 0 duplicates |
 
 ### The timeout case in one picture
@@ -126,7 +127,7 @@ Add `"idempotent_first_attempt": true` only if your workflow already sends the s
 ## Limitations (v0.1)
 
 - Only HTTP Request nodes are recovered.
-- Recovery needs the target service to answer "was this processed?" (here, the fake shop's `/check`). Real services (Gmail, Google Sheets, Stripe…) are not connected yet.
+- Recovery needs the target service to answer "was this processed?". So far that is the fake shop's `/check` and one real Google Sheet behind a small Apps Script web app I wrote (`experiments/sheets_apps_script.gs`). n8n's own Google Sheets / Gmail nodes and services like Stripe are not connected yet. In the Sheets test the late reply was caused on purpose by the script.
 - Nodes after the failed node are not continued.
 - `lookup_mode` and `settle_seconds` are assumptions about each service. If a service is set to `strong` but its lookup actually lags, a duplicate is still possible (there is a test that shows this).
 - Claims are files in `.ar_state/` on one machine. Workers on different machines or containers don't share them, so this does not stop two separate hosts from sending the same item; that needs a shared store (for example a database row with a unique constraint).
