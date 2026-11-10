@@ -5,6 +5,7 @@
   python3 ar.py recover <실행ID>      실패한 실행 하나를 직접 복구 (--yes 면 확인 없이)
   python3 ar.py list                 최근 실패한 실행 목록
   python3 ar.py services             services.json에 등록된 서비스 보기
+  python3 ar.py chaos ...            배포 전 실패 주입 테스트 (prepare / serve / report / reset)
 
 필요한 것: 같은 폴더의 .env 파일에 N8N_API_KEY=... (n8n 읽기 전용 키면 충분)
 """
@@ -35,6 +36,9 @@ def main():
         import recover
         sys.argv = ["recover.py", "--list"]
         recover.main()
+    elif cmd == "chaos":
+        import chaos
+        chaos.main(rest)
     elif cmd == "services":
         import recover
         svcs = recover.load_services()

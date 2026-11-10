@@ -33,6 +33,7 @@ Full numbers, execution IDs and notes (in Korean): [`experiments/results_ko.md`]
 |---|---|---|
 | `check.py` | Before failures | Reads every workflow and flags side-effect nodes (send, pay, ship…) that have auto-retry on, process many items at once, use short timeouts, or have no Idempotency-Key |
 | `watch.py` | As failures happen | Polls n8n every 10 s for new failed executions, builds a recovery plan, sends a macOS notification, and serves an approval page at `127.0.0.1:8100` |
+| `chaos.py` | Before you ship | Runs your workflow against a local sink that injects a 503 or a late reply, then reports duplicates and missing items |
 | `recover.py` | After a failure | For each item of the failed node, asks the target service "already processed?"; re-sends only the missing ones with an Idempotency-Key; asks before sending |
 
 Design rules:
@@ -65,6 +66,19 @@ python3 experiments/agent_checkout_demo.py   # AI assistant payment experiment (
 python3 experiments/exp6_no_lookup_demo.py   # service without a lookup (simulated n8n behavior)
 python3 experiments/exp7_ambiguous_demo.py   # 503 vs committed-but-timed-out, with a lagging lookup
 ```
+
+### Chaos test before you ship a workflow
+
+Suggested on the forum by someone who had the same incident in production: run an injected-failure test every time a workflow changes.
+
+```bash
+python3 ar.py chaos prepare <workflow-id>   # copy of the workflow whose HTTP writes go to a local test sink
+python3 ar.py chaos serve --fail-nth 33     # sink: request #33 gets a 503 (add --late-nth 20 for a late reply)
+# paste the chaos_<id>.json into n8n and run it, then:
+python3 ar.py chaos report                  # pass / fail: duplicates and missing items
+```
+
+Nothing real is sent during the test: every write goes to the sink. Requests that carry the same `Idempotency-Key` twice count as safe retries. Without a key, two identical writes count as a duplicate, which can be a false alarm if your workflow is meant to send the same thing twice.
 
 ### Tests
 
