@@ -19,6 +19,12 @@ All tests used a local fake shop / mail API so I could count exactly what happen
 | One item gets 503 (not written), another is written but times out, and the lookup lags 8 s behind writes | v0.1 trusted the early "not found" and re-sent both: **1 duplicate** | v0.3 re-sends nothing automatically: the written item is found later, the 503 item goes to a human. **0 duplicates**, 1 email left for a human |
 | Service has no "was this processed?" lookup | Retry: 49 duplicates | Recovery alone can't finish safely (1 email missing, handed to a human). **Adding an Idempotency-Key before the run** makes plain n8n Retry safe: 50 sent, 0 duplicates |
 
+### The timeout case in one picture
+
+![Shipments that actually happened when the shop processed the order but replied after the timeout: n8n Retry 2, Retry On Fail 3, Agent Recovery 1](docs/timeout-before-after.svg)
+
+The shop API processes the shipment immediately but replies after 10 s; the workflow waits 5 s. n8n records a failure each time, so both of its retry options ship again. Agent Recovery asks the shop first, sees the shipment exists, and sends nothing. (Measured on a real local n8n 2.46.6 with v0.1; the current rules make the same decision for this case once the settle window has passed.) Suggested on the [community thread](https://community.n8n.io/t/327579).
+
 Full numbers, execution IDs and notes (in Korean): [`experiments/results_ko.md`](experiments/results_ko.md)
 
 ## How it works

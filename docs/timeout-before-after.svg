@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="300" viewBox="0 0 760 300" role="img" aria-labelledby="t d" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <title id="t">Shipping request processed, reply after the timeout: how many shipments actually happened</title>
+  <desc id="d">Real local n8n 2.46.6 with a fake shop API that processes the shipment immediately but replies after 10 seconds, while the workflow waits 5 seconds. n8n Retry with original workflow: 2 shipments, run still marked error. n8n Retry On Fail with 3 tries: 3 shipments, run marked error. Agent Recovery: 1 shipment, it found the shipment already existed and re-sent nothing. Correct answer is 1.</desc>
+  <style>
+    .surface { fill: #fcfcfb; }
+    .bar { fill: #2a78d6; }
+    .ink { fill: #0b0b0b; }
+    .ink2 { fill: #52514e; }
+    .grid { stroke: #e4e3df; stroke-width: 1; }
+    .ref { stroke: #52514e; stroke-width: 1.5; stroke-dasharray: 4 4; }
+    @media (prefers-color-scheme: dark) {
+      .surface { fill: #1a1a19; }
+      .bar { fill: #3987e5; }
+      .ink { fill: #f0efec; }
+      .ink2 { fill: #c3c2b7; }
+      .grid { stroke: #3a3a37; }
+      .ref { stroke: #c3c2b7; }
+    }
+  </style>
+  <rect class="surface" width="760" height="300" rx="8"/>
+
+  <text class="ink" x="24" y="36" font-size="17" font-weight="600">The shop processed the shipment, but replied after the 5 s timeout</text>
+  <text class="ink2" x="24" y="58" font-size="13">Shipments that actually happened for one order. Real local n8n 2.46.6, fake shop API.</text>
+
+  <!-- x scale: 0..3 shipments mapped to 300..690 (130 px per shipment) -->
+  <line class="grid" x1="300" y1="80" x2="300" y2="250"/>
+  <line class="grid" x1="430" y1="80" x2="430" y2="250"/>
+  <line class="grid" x1="560" y1="80" x2="560" y2="250"/>
+  <line class="grid" x1="690" y1="80" x2="690" y2="250"/>
+  <text class="ink2" x="300" y="268" font-size="12" text-anchor="middle">0</text>
+  <text class="ink2" x="430" y="268" font-size="12" text-anchor="middle">1</text>
+  <text class="ink2" x="560" y="268" font-size="12" text-anchor="middle">2</text>
+  <text class="ink2" x="690" y="268" font-size="12" text-anchor="middle">3</text>
+  <text class="ink2" x="495" y="288" font-size="12" text-anchor="middle">shipments</text>
+
+  <!-- row 1: n8n Retry -->
+  <text class="ink" x="24" y="104" font-size="14" font-weight="600">n8n "Retry"</text>
+  <text class="ink2" x="24" y="122" font-size="12">re-sent it; run still shows error</text>
+  <path class="bar" d="M300 96 H556 a4 4 0 0 1 4 4 V114 a4 4 0 0 1 -4 4 H300 Z"/>
+  <text class="ink" x="568" y="112" font-size="14" font-weight="600">2</text>
+
+  <!-- row 2: Retry On Fail -->
+  <text class="ink" x="24" y="160" font-size="14" font-weight="600">n8n "Retry On Fail" (3 tries)</text>
+  <text class="ink2" x="24" y="178" font-size="12">every try was processed; still error</text>
+  <path class="bar" d="M300 152 H686 a4 4 0 0 1 4 4 V170 a4 4 0 0 1 -4 4 H300 Z"/>
+  <text class="ink" x="698" y="168" font-size="14" font-weight="600">3</text>
+
+  <!-- row 3: Agent Recovery -->
+  <text class="ink" x="24" y="216" font-size="14" font-weight="600">Agent Recovery</text>
+  <text class="ink2" x="24" y="234" font-size="12">checked first: already shipped, sent nothing</text>
+  <path class="bar" d="M300 208 H426 a4 4 0 0 1 4 4 V226 a4 4 0 0 1 -4 4 H300 Z"/>
+  <text class="ink" x="438" y="224" font-size="14" font-weight="600">1</text>
+
+  <!-- reference: correct = 1 -->
+  <line class="ref" x1="430" y1="78" x2="430" y2="250"/>
+  <text class="ink2" x="436" y="88" font-size="12">correct: 1</text>
+</svg>
