@@ -36,6 +36,16 @@
       "exists": "exists",
       "lookup_mode": "strong",
       "settle_seconds": 30
+    },
+    {
+      "name": "Google Sheets (Apps Script 웹 앱, 실험 9)",
+      "_메모": "주소는 .env의 SHEETS_URL에서 읽음. 스크립트가 잠금을 잡고 기록한 뒤 flush하고, 조회도 같은 시트를 바로 읽어서 strong으로 둠",
+      "match": "${SHEETS_URL}",
+      "id_field": "order_id",
+      "lookup": "${SHEETS_URL}?order_id={id}",
+      "exists": "found",
+      "lookup_mode": "strong",
+      "settle_seconds": 30
     }
   ]
 }

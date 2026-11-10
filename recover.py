@@ -45,7 +45,8 @@ def load_services():
 
 def find_service(url):
     for svc in load_services():
-        if url.startswith(svc["match"]):
+        match = _env(svc["match"])  # 주소 자체가 비밀이면 ${이름}으로 .env에서 읽음
+        if match and url.startswith(match):
             return svc
     return None
 

@@ -1,0 +1,49 @@
+{
+  "name": "실험 9 - 진짜 Google Sheets, 기록은 됐는데 답이 늦음",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "sheets-test",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "c9000000-0001-4000-8000-000000000001",
+      "name": "웹훅",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "c9000000-0001-4000-8000-0000000000aa"
+    },
+    {
+      "parameters": {
+        "jsCode": "const run = 'r' + Date.now().toString(36);\nreturn [1, 2, 3, 4, 5].map(n => ({ json: { order_id: `${run}-order-${n}`, to: `customer${n}@example.com`, slow: n === 3 } }));"
+      },
+      "id": "c9000000-0002-4000-8000-000000000002",
+      "name": "주문 5건",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "SHEETS_URL_PLACEHOLDER",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ order_id: $json.order_id, to: $json.to, slow: $json.slow }) }}",
+        "options": { "timeout": 5000 }
+      },
+      "id": "c9000000-0003-4000-8000-000000000003",
+      "name": "시트에 주문 기록 (5초 제한)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 0]
+    }
+  ],
+  "connections": {
+    "웹훅": { "main": [[{ "node": "주문 5건", "type": "main", "index": 0 }]] },
+    "주문 5건": { "main": [[{ "node": "시트에 주문 기록 (5초 제한)", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" }
+}
