@@ -74,9 +74,11 @@ Suggested on the forum by someone who had the same incident in production: run a
 ```bash
 python3 ar.py chaos prepare <workflow-id>   # copy of the workflow whose HTTP writes go to a local test sink
 python3 ar.py chaos serve --fail-nth 33     # sink: request #33 gets a 503 (add --late-nth 20 for a late reply)
-# paste the chaos_<id>.json into n8n and run it, then:
-python3 ar.py chaos report                  # pass / fail: duplicates and missing items
+# paste the chaos_<id>.json into n8n and publish it, then one command:
+python3 ar.py chaos run http://127.0.0.1:5678/webhook/chaos-<workflow-id>
 ```
+
+`prepare` adds a `chaos test trigger` webhook to the copy, wired like the original trigger. `run` clears the sink, calls the webhook, waits for the workflow to finish, and prints the verdict. It exits with 0 on pass, 1 on fail and 2 if the test couldn't run, so it can go in CI and run on every workflow change. (`chaos report` and `chaos reset` are there for manual runs.)
 
 On a real local n8n 2.46.6, with a 503 injected at request #33 of a 50-email workflow:
 

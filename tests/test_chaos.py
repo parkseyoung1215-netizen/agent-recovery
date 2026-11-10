@@ -88,7 +88,7 @@ class Prepare(unittest.TestCase):
             {"name": "dyn", "type": "n8n-nodes-base.httpRequest", "parameters": {"method": "POST", "url": "={{ $json.url }}"}},
         ], "connections": {}}
         copy, changed, skipped = chaos.prepare(wf)
-        urls = {n["name"]: n["parameters"]["url"] for n in copy["nodes"]}
+        urls = {n["name"]: n["parameters"]["url"] for n in copy["nodes"] if "url" in n["parameters"]}
         self.assertEqual(urls["pay"], "http://127.0.0.1:8200/sink/https/api.example.com/pay?x=1")
         self.assertEqual(urls["read"], "https://api.example.com/items")
         self.assertEqual(urls["dyn"], "={{ $json.url }}")
@@ -100,3 +100,54 @@ class Prepare(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunCommand(unittest.TestCase):
+    """ar.py chaos run: 웹훅으로 워크플로를 실행하고 판정을 종료 코드로 돌려주는지"""
+
+    def setUp(self):
+        srv, self.sink = chaos.serve(fail_nth=33, late_nth=0, late_seconds=0, port=chaos.PORT)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+
+    def fake_n8n(self, keyed):
+        """웹훅을 받으면 Retry On Fail 노드처럼 50건을 시험용 목적지로 보내는 가짜 n8n"""
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        items = ChaosVerdicts.ITEMS
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                if not self.path.startswith("/webhook/chaos-"):
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                ok = run_node(chaos.SINK, items, keyed=keyed, tries=3)
+                self.send_response(200 if ok else 500)
+                self.end_headers()
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return f"http://127.0.0.1:{srv.server_address[1]}"
+
+    def test_exit_codes(self):
+        base = self.fake_n8n(keyed=False)
+        self.assertEqual(chaos.run(base + "/webhook/chaos-B", settle=0), 1)
+        base = self.fake_n8n(keyed=True)
+        self.assertEqual(chaos.run(base + "/webhook/chaos-C", settle=0), 0)
+        self.assertEqual(chaos.run(base + "/webhook-missing", settle=0), 2)
+
+    def test_prepare_adds_webhook_wired_like_the_original_trigger(self):
+        wf = {"id": "abc", "name": "orders", "nodes": [
+            {"name": "start", "type": "n8n-nodes-base.manualTrigger", "parameters": {}},
+            {"name": "build", "type": "n8n-nodes-base.code", "parameters": {}},
+        ], "connections": {"start": {"main": [[{"node": "build", "type": "main", "index": 0}]]}}}
+        copy, _, _ = chaos.prepare(wf)
+        hook = next(n for n in copy["nodes"] if n["name"] == "chaos test trigger")
+        self.assertEqual(hook["parameters"]["path"], "chaos-abc")
+        self.assertEqual(copy["connections"]["chaos test trigger"], wf["connections"]["start"])

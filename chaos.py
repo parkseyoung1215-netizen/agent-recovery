@@ -12,6 +12,10 @@ https://community.n8n.io/t/327579
       --late-nth 0         N번째 쓰기 요청은 기록한 뒤 늦게 응답 (0이면 안 함)
       --late-seconds 10    늦게 응답할 때 몇 초 뒤에
   python3 ar.py chaos report                    결과 보기 (통과/실패)
+  python3 ar.py chaos run <웹훅주소>               한 줄로 시험: 기록 지우기 → 워크플로 실행 → 판정 (CI용)
+      → prepare가 시험용 복사본에 'chaos test trigger' 웹훅을 넣어둬요. n8n에서 그 복사본을 게시(Publish)하면
+        웹훅 주소(예: http://127.0.0.1:5678/webhook/chaos-<워크플로ID>)로 실행할 수 있어요.
+        통과면 종료 코드 0, 실패면 1이라 CI에서 그대로 쓸 수 있어요.
   python3 ar.py chaos reset                     기록 지우기 (같은 실패 설정으로 다시 시험)
 
 판정 기준
@@ -64,10 +68,31 @@ def prepare(workflow):
         u = urllib.parse.urlparse(url)
         p["url"] = f"{SINK}{u.scheme}/{u.netloc}{u.path}" + (f"?{u.query}" if u.query else "")
         changed.append(f"{node['name']}: {method} {url} → {p['url']}")
+    add_test_trigger(wf)
     keep = {"name", "nodes", "connections", "settings"}
     wf = {k: v for k, v in wf.items() if k in keep}
     wf["name"] = "[chaos test] " + wf.get("name", "workflow")
     return wf, changed, skipped
+
+
+TRIGGER_TYPES = ("Trigger", "manualTrigger", "webhook")
+
+
+def add_test_trigger(wf):
+    """시험용 웹훅 트리거를 넣어, 원래 트리거가 하던 것처럼 다음 노드를 실행하게 한다."""
+    nodes = wf.setdefault("nodes", [])
+    conns = wf.setdefault("connections", {})
+    if any(n["name"] == "chaos test trigger" for n in nodes):
+        return
+    trigger = next((n for n in nodes if n.get("type", "").endswith(TRIGGER_TYPES)), None)
+    targets = conns.get(trigger["name"], {}).get("main", [[]]) if trigger else [[]]
+    wid = str(wf.get("id") or "workflow")
+    nodes.append({
+        "parameters": {"httpMethod": "POST", "path": f"chaos-{wid}", "responseMode": "lastNode", "options": {}},
+        "name": "chaos test trigger", "type": "n8n-nodes-base.webhook", "typeVersion": 2,
+        "position": [0, 300], "webhookId": f"chaos-{wid}",
+    })
+    conns["chaos test trigger"] = {"main": json.loads(json.dumps(targets))}
 
 
 # ---------------- 시험용 가짜 목적지 ----------------
@@ -193,6 +218,40 @@ def print_report(r):
               "\n자동 재시도는 키가 있을 때만 켜세요. 키를 지원하지 않는 서비스면 ar.py check / recover로 사람이 확인하게 하세요.")
 
 
+def _sink(path, timeout=5):
+    with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/{path}", timeout=timeout) as r:
+        return json.loads(r.read())
+
+
+def run(webhook_url, wait=120, settle=3):
+    """기록 지우기 → 웹훅으로 워크플로 실행 → 판정. 통과면 0, 실패면 1, 시험 자체가 안 되면 2."""
+    try:
+        _sink("reset")
+    except urllib.error.URLError:
+        print("시험용 가짜 목적지가 꺼져 있어요. 먼저 python3 ar.py chaos serve 를 켜세요.")
+        return 2
+    print(f"워크플로 실행: {webhook_url}")
+    req = urllib.request.Request(webhook_url, data=b"{}", method="POST", headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=wait) as r:
+            print(f"  워크플로 응답: {r.status}")
+    except urllib.error.HTTPError as e:
+        print(f"  워크플로 응답: {e.code} (워크플로가 실패로 끝났을 수 있음 - 판정은 기록으로 함)")
+        if e.code == 404:
+            print("  웹훅을 찾지 못했어요. n8n에서 시험용 복사본을 게시(Publish)했는지 확인하세요.")
+            return 2
+    except urllib.error.URLError as e:
+        print(f"  워크플로를 실행하지 못했어요: {e.reason}")
+        return 2
+    time.sleep(settle)
+    r = _sink("report")
+    if r["쓰기 요청 수"] == 0:
+        print("  쓰기 요청이 하나도 오지 않았어요. 시험용 복사본(prepare 결과)을 실행한 게 맞는지 확인하세요.")
+        return 2
+    print_report(r)
+    return 0 if r["판정"] == "통과" else 1
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="ar.py chaos")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -205,6 +264,10 @@ def main(argv=None):
     p2.add_argument("--late-seconds", type=int, default=10)
     sub.add_parser("report")
     sub.add_parser("reset")
+    p3 = sub.add_parser("run")
+    p3.add_argument("webhook_url")
+    p3.add_argument("--wait", type=int, default=120, help="워크플로가 끝나길 기다릴 최대 초")
+    p3.add_argument("--settle", type=int, default=3, help="끝난 뒤 늦은 응답을 기다릴 초")
     a = ap.parse_args(argv)
 
     if a.cmd == "prepare":
@@ -220,13 +283,16 @@ def main(argv=None):
             print(f"  주의: {s}")
         if not changed:
             print("  바꿀 HTTP 쓰기 노드가 없어요.")
-        print("\n다음: 1) python3 ar.py chaos serve  2) 이 JSON을 n8n에 붙여넣고 실행  3) python3 ar.py chaos report")
+        print(f"\n다음: 1) python3 ar.py chaos serve  2) 이 JSON을 n8n에 붙여넣고 게시(Publish)"
+              f"\n      3) python3 ar.py chaos run http://127.0.0.1:5678/webhook/chaos-{a.workflow_id}")
     elif a.cmd == "serve":
         srv, _ = serve(a.fail_nth, a.late_nth, a.late_seconds)
         print(f"시험용 가짜 목적지 실행 중: {SINK}  (끄려면 Ctrl + C)")
         print(f"실패 설정: {a.fail_nth}번째 쓰기 요청 503" +
               (f", {a.late_nth}번째는 {a.late_seconds}초 늦게 응답" if a.late_nth else ""))
         srv.serve_forever()
+    elif a.cmd == "run":
+        sys.exit(run(a.webhook_url, a.wait, a.settle))
     elif a.cmd in ("report", "reset"):
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/{a.cmd}", timeout=5) as r:
