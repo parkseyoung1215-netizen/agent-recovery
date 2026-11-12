@@ -24,6 +24,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -238,7 +239,11 @@ def send_items(todo, plan, ex_id, worker="cli"):
             result["skipped_claimed"] += 1
             result["lines"].append(f"{x['id']}: 다른 작업자가 이미 잡았거나 처리 기록이 있음 ({claim_state(job)}) → 건너뜀")
             continue
-        mark(job, "sending")
+        headers = {"Content-Type": "application/json", "Idempotency-Key": x["key"]}
+        # 보내기 '전에' 실제로 보낼 요청을 그대로 남긴다 (멈췄을 때 사람이 볼 것)
+        mark(job, "sending", request={"method": plan["method"], "url": plan["url"],
+                                      "headers": headers, "body": x["body"]},
+             sending_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
         code, _ = http(plan["method"], plan["url"], body=x["body"], headers={"Idempotency-Key": x["key"]})
         if isinstance(code, int) and 200 <= code < 300:
             mark(job, "sent", code=code)
@@ -289,13 +294,52 @@ def make_plan(execution, workflow, min_age=0, ex_id=None):
         if prior and status != "이미 처리됨":
             status = "확인 불가"
             note = f"이전 복구 기록이 '{prior}' 상태로 남아 있음"
+        elif status == "확인 불가" and found is None:
+            note = "조회가 true/false로 답하지 않음 (오류·이상한 응답)"
+        elif status == "확인 불가":
+            note = f"조회상 없음, 하지만 늦게 반영되는 서비스라 {settle}초가 지나도 '안 써졌다'는 증거가 안 됨"
         else:
             note = None
-        plan.append({"index": i, "id": ident, "body": body, "status": status, "note": note,
+        plan.append({"index": i, "id": ident, "body": body, "status": status, "note": note, "lookup": found,
                      "key": f"{parsed.path.strip('/')}-{ident}"})
     return {"node": failed_name, "url": url, "method": p.get("method", "GET"), "field": field,
             "service": svc, "settle": settle,
             "error": (rd.get("error") or {}).get("message"), "plan": plan, "downstream": downstream}
+
+
+REVIEW_DIR = HERE / ".ar_state" / "review"
+
+
+def write_review(plan, ex_id):
+    """사람에게 넘기는 항목마다, 판단에 필요한 걸 한 파일에 남긴다.
+
+    주의: n8n은 실패한 노드가 실제로 보낸 바이트를 저장하지 않는다. 그래서 첫 시도의 요청은
+    n8n 실행 기록(앞 노드 출력 + 노드 설정)으로 '다시 만든 것'이고, 그 사실을 파일에 적는다.
+    복구 도구가 보낸 요청은 보내기 전에 claims 기록에 그대로 남긴다.
+    """
+    items = [x for x in plan["plan"] if x["status"] == "확인 불가"]
+    if not items:
+        return None
+    REVIEW_DIR.mkdir(parents=True, exist_ok=True)
+    out = []
+    for x in items:
+        job = f"{ex_id}:{plan['url']}:{x['id']}"
+        p = _claim_path(job)
+        out.append({
+            "id_field": plan["field"], "id": x["id"],
+            "why_not_sent": x.get("note"),
+            "lookup_answer": x.get("lookup"),
+            "n8n_error": plan["error"],
+            "first_attempt_request": {
+                "method": plan["method"], "url": plan["url"], "body": x["body"],
+                "source": "n8n이 저장하지 않아서 실행 기록으로 다시 만든 것 (보낸 바이트 그대로가 아님)",
+            },
+            "recovery_attempt": json.loads(p.read_text()) if p.exists() else None,
+            "to_check": f"상대 서비스에서 {plan['field']}={x['id']}가 실제로 있는지 직접 확인",
+        })
+    path = REVIEW_DIR / f"{ex_id}.json"
+    path.write_text(json.dumps(out, ensure_ascii=False, indent=2))
+    return path
 
 
 def show(plan):
@@ -311,8 +355,7 @@ def show(plan):
     if unknown:
         print(f"  확인 불가       {len(unknown):>3}개  → 써졌는지 확신할 수 없어 보내지 않음 (사람이 확인 필요)")
     for x in unknown:
-        if x.get("note"):
-            print(f"    - {plan['field']}={x['id']}: {x['note']}")
+        print(f"    - {plan['field']}={x['id']}: {x.get('note')}")
     if waiting:
         print(f"  확인 대기       {len(waiting):>3}개  → 기록이 늦게 반영될 수 있어 {plan['settle']}초 뒤 다시 조회해야 함")
     for x in todo[:10]:
@@ -350,6 +393,9 @@ def main():
     workflow = n8n(f"/workflows/{execution['workflowId']}", key)
     plan = make_plan(execution, workflow, ex_id=ex_id)
     todo = show(plan)
+    review = write_review(plan, ex_id)
+    if review:
+        print(f"사람 확인용 기록: {review}")
     if not todo:
         rest = [x for x in plan["plan"] if x["status"] != "이미 처리됨"]
         if rest:

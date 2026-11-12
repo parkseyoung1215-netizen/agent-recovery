@@ -175,6 +175,41 @@ class RestartAfterSending(unittest.TestCase):
         self.assertEqual((r["sent"], self.sent), (0, []))
 
 
+    def test_request_is_recorded_before_it_is_sent(self):
+        """BorkoB 질문: 사람이 보는 건 ID뿐인가, 보내기 전 요청 그대로인가 → 보내기 전에 요청을 남긴다"""
+        seen = {}
+        recover_http = recover.http
+
+        def peek(method, url, body=None, headers=None, timeout=15):
+            if method == "POST":   # 보내는 순간, 기록에는 이미 요청이 있어야 함
+                seen.update(json.loads(recover._claim_path(job).read_text()))
+            return recover_http(method, url, body, headers, timeout)
+        plan = recover.make_plan(self._execution(), self._workflow(), ex_id="78")
+        job = "78:http://x/email:customer20@example.com"
+        recover.http, inner = peek, recover.http
+        try:
+            recover_http = inner
+            recover.send_items(plan["plan"], plan, "78")
+        finally:
+            recover.http = inner
+        self.assertEqual(seen["state"], "sending")
+        self.assertEqual(seen["request"]["body"], {"to": "customer20@example.com"})
+        self.assertEqual(seen["request"]["headers"]["Idempotency-Key"], plan["plan"][0]["key"])
+
+    def test_review_file_for_human_has_reason_request_and_its_source(self):
+        recover.REVIEW_DIR = Path(self.tmp.name) / "review"
+        job = "79:http://x/email:customer20@example.com"
+        recover.claim(job)
+        recover.mark(job, "sending", request={"method": "POST", "body": {"to": "customer20@example.com"}})
+        plan = recover.make_plan(self._execution(), self._workflow(), ex_id="79")
+        path = recover.write_review(plan, "79")
+        rec = json.loads(path.read_text())[0]
+        self.assertEqual(rec["id"], "customer20@example.com")
+        self.assertIn("sending", rec["why_not_sent"])
+        self.assertEqual(rec["first_attempt_request"]["body"], {"to": "customer20@example.com"})
+        self.assertIn("다시 만든 것", rec["first_attempt_request"]["source"])
+        self.assertEqual(rec["recovery_attempt"]["request"]["body"], {"to": "customer20@example.com"})
+
 class FakeShopIntegration(unittest.TestCase):
     """실험 7 상황: customer10은 503(안 써짐), customer20은 써졌지만 타임아웃, 조회는 8초 늦게 반영."""
 

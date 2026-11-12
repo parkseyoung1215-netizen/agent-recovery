@@ -58,6 +58,7 @@ def build(ex_id, key):
             plan["status"] = "확인 대기"       # 조회 결과가 늦게 반영될 수 있어 잠시 뒤 다시 확인
         elif "확인 불가" in statuses:
             plan["status"] = "사람 확인 필요"
+            plan["review"] = str(recover.write_review(plan, ex_id))
         else:
             plan["status"] = "복구 필요 없음"
     except SystemExit as e:               # recover.py는 문제가 있으면 sys.exit으로 이유를 알려줌
@@ -159,6 +160,8 @@ def page():
                        f"· 다시 보내야 함 <b>{len(todo)}</b>개"
                        + (f" ({e(', '.join(str(x['id']) for x in todo[:5]))}{' …' if len(todo) > 5 else ''})" if todo else "")
                        + (f"<br>· 확인 불가 <b>{len(unknown)}</b>개 → 안전을 위해 보내지 않음" if unknown else "")
+                       + "".join(f"<br>&nbsp;&nbsp;- {e(str(x['id']))}: {e(str(x.get('note')))}" for x in unknown[:10])
+                       + (f"<br><small>요청 내용과 판단 근거: {e(p['review'])}</small>" if p.get("review") else "")
                        + f"<br><small>n8n 기본 Retry였다면 {len(p['plan'])}건을 전부 다시 보냈을 거예요.</small></p>")
             if p.get("downstream"):
                 out.append(f"<p><small>주의: 다음 노드 {e(', '.join(p['downstream']))}는 v0.1에서 이어서 실행하지 않아요.</small></p>")
