@@ -75,7 +75,8 @@ Suggested on the forum by someone who had the same incident in production: run a
 
 ```bash
 python3 ar.py chaos prepare <workflow-id>   # copy of the workflow whose HTTP writes go to a local test sink
-python3 ar.py chaos serve --fail-nth 33     # sink: request #33 gets a 503 (add --late-nth 20 for a late reply)
+python3 ar.py chaos learn <workflow-id>     # optional: learn request shapes from real successful runs
+python3 ar.py chaos serve --fail-nth 33     # sink: request #33 gets a 503 (add --late-nth 20 for a late reply, --contract to enforce shapes)
 # paste the chaos_<id>.json into n8n and publish it, then one command:
 python3 ar.py chaos run http://127.0.0.1:5678/webhook/chaos-<workflow-id>
 ```
@@ -93,6 +94,8 @@ On a real local n8n 2.46.6, with a 503 injected at request #33 of a 50-email wor
 `chaos run` reproduced the last two rows from one command each: Retry On Fail without a key exited with **1** (49 duplicates), with the key it exited with **0**. In both runs n8n answered the webhook with 200.
 
 The last row passes only because the sink honors the key, the way a destination that supports idempotency keys would.
+
+**Keeping the sink honest (contract).** A sink that accepts anything can pass a workflow the real API would reject; this was pointed out on the forum by EKH1. `python3 ar.py chaos learn <workflow-id>` reads the workflow's recent successful executions and records, for each write, which fields and types the real API accepted and one real response. `chaos serve --contract contract_<id>.json` then answers with that real response and rejects with 400 (and fails the verdict) any request with a missing field, a new field, or a changed type. This is only "the shapes the real API accepted before", not the API's rules: a harmless new field is flagged, and a rule the API changes is missed until you run `learn` again. So far it is covered by unit tests only, not yet run against a real n8n.
 
 Nothing real is sent during the test: every write goes to the sink. Requests that carry the same `Idempotency-Key` twice count as safe retries. Without a key, two identical writes count as a duplicate, which can be a false alarm if your workflow is meant to send the same thing twice.
 

@@ -17,6 +17,11 @@ https://community.n8n.io/t/327579
         웹훅 주소(예: http://127.0.0.1:5678/webhook/chaos-<워크플로ID>)로 실행할 수 있어요.
         통과면 종료 코드 0, 실패면 1이라 CI에서 그대로 쓸 수 있어요.
   python3 ar.py chaos reset                     기록 지우기 (같은 실패 설정으로 다시 시험)
+  python3 ar.py chaos learn <워크플로ID>          실제로 성공한 실행에서 '계약' 배우기
+      → 진짜 API가 성공으로 받아준 요청의 필드·타입과, 진짜 응답의 예시를 contract_<ID>.json에 저장.
+        serve --contract contract_<ID>.json 으로 켜면 가짜 목적지가 그 계약에 없는 모양의 요청을
+        400으로 거절하고(판정 실패), 응답도 진짜 응답 예시를 돌려줘요.
+        아이디어 출처: n8n 커뮤니티 EKH1 - "가짜 목적지가 실제 API와 점점 달라지는 게 진짜 문제"
 
 판정 기준
   중복: 중복 방지 키(Idempotency-Key) 없이 같은 요청이 두 번 이상 기록됨 → 실패
@@ -27,6 +32,8 @@ https://community.n8n.io/t/327579
 한계
   - 키가 없으면 '같은 요청'을 본문 내용으로 판단해요. 원래 같은 내용을 두 번 보내는 게 맞는 워크플로라면
     중복으로 잘못 셀 수 있어요.
+  - 계약은 '진짜 API가 받아준 적 있는 모양'일 뿐, 진짜 API의 규칙 전체가 아니에요. 성공한 실행에서 본 적 없는
+    필드는 진짜로 괜찮아도 위반으로 잡고, 진짜 API가 규칙을 바꾸면 다시 learn 하기 전까지는 모르는 채로 통과해요.
   - 읽기(GET) 요청은 빈 응답 {}을 돌려줘요. 응답 내용에 따라 다음 단계가 달라지는 워크플로는 실제와 다를 수 있어요.
   - URL이 식(={{ ... }})으로 된 노드는 자동으로 바꾸지 못하고 알려주기만 해요.
 """
@@ -95,12 +102,88 @@ def add_test_trigger(wf):
     conns["chaos test trigger"] = {"main": json.loads(json.dumps(targets))}
 
 
+# ---------------- 계약: 진짜 API가 받아준 요청의 모양 ----------------
+def _jtype(v):
+    return {bool: "boolean", int: "number", float: "number", str: "string",
+            list: "array", dict: "object", type(None): "null"}.get(type(v), "other")
+
+
+def learn(workflow, executions):
+    """성공한 실행들에서, HTTP 쓰기 노드마다 진짜 API가 받아준 요청의 필드·타입과 응답 예시를 모은다."""
+    import recover
+    contracts = {}
+    for node in workflow.get("nodes", []):
+        p = node.get("parameters", {})
+        method = (p.get("method") or "GET").upper()
+        url = p.get("url", "")
+        if node.get("type") != "n8n-nodes-base.httpRequest" or method not in WRITE or url.startswith("="):
+            continue
+        u = urllib.parse.urlparse(url)
+        key = f"{method} {u.scheme}/{u.netloc}{u.path}"
+        c = {"node": node["name"], "requests": 0, "fields": {}, "response_example": None, "executions": []}
+        for ex in executions:
+            runs = ex["data"]["resultData"].get("runData", {})
+            run = (runs.get(node["name"]) or [None])[-1]
+            if not run or run.get("error"):
+                continue
+            parent = ((run.get("source") or [{}])[0] or {}).get("previousNode")
+            items = recover.output_items(runs, parent) if parent else []
+            outs = recover.output_items(runs, node["name"])
+            for i, it in enumerate(items):
+                try:
+                    body = recover.build_body(p.get("jsonBody"), it["json"], i, runs)
+                except ValueError:
+                    continue
+                c["requests"] += 1
+                for f, v in body.items():
+                    e = c["fields"].setdefault(f, {"types": [], "seen": 0})
+                    e["seen"] += 1
+                    if _jtype(v) not in e["types"]:
+                        e["types"].append(_jtype(v))
+            if outs and c["response_example"] is None:
+                c["response_example"] = outs[0].get("json")
+            c["executions"].append(str(ex.get("id")))
+        if c["requests"]:
+            contracts[key] = c
+    return {"learned_at": datetime.now().strftime("%Y-%m-%d %H:%M"), "contracts": contracts}
+
+
+def check_contract(contract, body_text):
+    """요청 본문이 계약과 다르면 이유 목록을 돌려준다 (같으면 빈 목록)."""
+    try:
+        body = json.loads(body_text) if body_text else {}
+    except json.JSONDecodeError:
+        return ["본문이 JSON이 아님"]
+    if not isinstance(body, dict):
+        return ["본문이 JSON 객체가 아님"]
+    fields, why = contract["fields"], []
+    for f, e in fields.items():
+        if e["seen"] == contract["requests"] and f not in body:
+            why.append(f"필수 필드 '{f}'가 없음")
+    for f, v in body.items():
+        if f not in fields:
+            why.append(f"성공한 실행에서 본 적 없는 필드 '{f}'")
+        elif _jtype(v) not in fields[f]["types"]:
+            why.append(f"'{f}'의 타입이 {_jtype(v)} (진짜 API가 받아준 건 {'/'.join(fields[f]['types'])})")
+    return why
+
+
 # ---------------- 시험용 가짜 목적지 ----------------
 class Sink:
-    def __init__(self, fail_nth=33, late_nth=0, late_seconds=10):
+    def __init__(self, fail_nth=33, late_nth=0, late_seconds=10, contract=None):
         self.cfg = {"fail_nth": fail_nth, "late_nth": late_nth, "late_seconds": late_seconds}
+        self.contract = contract or {}
         self.lock = threading.Lock()
         self.reset()
+
+    def _contract_for(self, method, path):
+        rest = path.split("?", 1)[0]
+        rest = rest[len("/sink/"):] if rest.startswith("/sink/") else rest.lstrip("/")
+        return (self.contract.get("contracts") or {}).get(f"{method} {rest}")
+
+    def response_for(self, method, path):
+        c = self._contract_for(method, path)
+        return c.get("response_example") if c and c.get("response_example") is not None else {"ok": True}
 
     def reset(self):
         with self.lock:
@@ -110,6 +193,7 @@ class Sink:
             self.deduped = 0              # 같은 키로 다시 와서 무시한 횟수
             self.injected_503 = 0
             self.late = 0
+            self.violations = []          # 계약 위반 (진짜 API라면 거절했을 수 있는 요청)
             self.log = []
 
     def handle(self, method, path, headers, body):
@@ -120,6 +204,12 @@ class Sink:
             self.n += 1
             n = self.n
             self.seen.setdefault(ident, {"path": path, "body": body[:200], "keyed": bool(key_header)})
+            c = self._contract_for(method, path)
+            why = check_contract(c, body) if c else []
+            if why:
+                self.violations.append({"body": body[:200], "why": why})
+                self.log.append((n, ident, "계약 위반 → 400"))
+                return 400, 0
             if self.cfg["fail_nth"] and n == self.cfg["fail_nth"]:
                 self.injected_503 += 1
                 self.log.append((n, ident, "503 주입 (기록 안 됨)"))
@@ -142,6 +232,8 @@ class Sink:
             problems = []
             if dups:
                 problems.append(f"중복 {sum(c - 1 for c in dups.values())}건: 같은 요청이 키 없이 두 번 이상 기록됨 ({len(dups)}개 항목)")
+            if self.violations:
+                problems.append(f"계약 위반 {len(self.violations)}건: 진짜 API가 성공으로 받아준 적 없는 모양의 요청")
             if missing:
                 problems.append(f"누락 {len(missing)}건: 시도는 됐는데 끝내 기록되지 않음")
             return {
@@ -157,6 +249,9 @@ class Sink:
                 "중복 예시": [self.seen[k]["body"] for k in list(dups)[:3]],
                 "누락 예시": [self.seen[k]["body"] for k in missing[:3]],
                 "키를 붙인 항목 비율": f"{sum(1 for v in self.seen.values() if v['keyed'])}/{len(self.seen)}",
+                "계약": (f"{self.contract.get('learned_at')}에 배운 것, {len(self.contract.get('contracts', {}))}개 목적지"
+                         if self.contract else "없음 (모든 요청을 받아줌)"),
+                "계약 위반 예시": self.violations[:3],
             }
 
 
@@ -190,14 +285,19 @@ def make_handler(sink):
             code, delay = sink.handle(self.command, self.path, self.headers, body)
             if delay:
                 time.sleep(delay)
-            self._send(code, {"ok": code == 200} if code == 200 else {"error": "Service Unavailable (chaos test)"})
+            if code == 200:
+                self._send(200, sink.response_for(self.command, self.path))
+            elif code == 400:
+                self._send(400, {"error": "Bad Request (chaos test: 계약 위반)"})
+            else:
+                self._send(code, {"error": "Service Unavailable (chaos test)"})
 
         do_POST = do_PUT = do_PATCH = do_DELETE = _write
     return H
 
 
-def serve(fail_nth, late_nth, late_seconds, port=PORT):
-    sink = Sink(fail_nth, late_nth, late_seconds)
+def serve(fail_nth, late_nth, late_seconds, port=PORT, contract=None):
+    sink = Sink(fail_nth, late_nth, late_seconds, contract)
     srv = ThreadingHTTPServer(("127.0.0.1", port), make_handler(sink))
     return srv, sink
 
@@ -209,6 +309,9 @@ def print_report(r):
     print(f"\n쓰기 요청 {r['쓰기 요청 수']}번 / 서로 다른 항목 {r['서로 다른 항목']}개 / 기록된 항목 {r['기록된 항목']}개")
     print(f"주입한 503 {r['주입한 503']}번, 늦은 응답 {r['늦은 응답']}번, 중복 방지된 재시도 {r['중복 방지된 재시도']}번")
     print(f"중복 방지 키를 붙인 항목: {r['키를 붙인 항목 비율']}")
+    print(f"계약: {r.get('계약', '없음')}")
+    for v in r.get("계약 위반 예시") or []:
+        print(f"  계약 위반: {v['body']}\n    → {'; '.join(v['why'])}")
     if r["중복 예시"]:
         print("중복 예시:", *r["중복 예시"], sep="\n  ")
     if r["누락 예시"]:
@@ -262,6 +365,11 @@ def main(argv=None):
     p2.add_argument("--fail-nth", type=int, default=33)
     p2.add_argument("--late-nth", type=int, default=0)
     p2.add_argument("--late-seconds", type=int, default=10)
+    p2.add_argument("--contract", help="chaos learn으로 만든 계약 파일")
+    p4 = sub.add_parser("learn")
+    p4.add_argument("workflow_id")
+    p4.add_argument("--limit", type=int, default=20, help="최근 성공한 실행 몇 개에서 배울지")
+    p4.add_argument("--out")
     sub.add_parser("report")
     sub.add_parser("reset")
     p3 = sub.add_parser("run")
@@ -285,8 +393,26 @@ def main(argv=None):
             print("  바꿀 HTTP 쓰기 노드가 없어요.")
         print(f"\n다음: 1) python3 ar.py chaos serve  2) 이 JSON을 n8n에 붙여넣고 게시(Publish)"
               f"\n      3) python3 ar.py chaos run http://127.0.0.1:5678/webhook/chaos-{a.workflow_id}")
+    elif a.cmd == "learn":
+        import recover
+        key = recover.load_api_key()
+        wf = recover.n8n(f"/workflows/{a.workflow_id}", key)
+        lst = recover.n8n(f"/executions?workflowId={a.workflow_id}&status=success&limit={a.limit}", key)
+        exs = [recover.n8n(f"/executions/{e['id']}?includeData=true", key) for e in lst.get("data", [])]
+        c = learn(wf, exs)
+        out = Path(a.out or f"contract_{a.workflow_id}.json")
+        out.write_text(json.dumps(c, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"성공한 실행 {len(exs)}개에서 배웠어요: {out}")
+        for k, v in c["contracts"].items():
+            req = [f for f, e in v["fields"].items() if e["seen"] == v["requests"]]
+            print(f"  {k}  (요청 {v['requests']}건, 필수 필드: {', '.join(req) or '없음'})")
+        if not c["contracts"]:
+            print("  배울 게 없어요. 진짜 서비스로 성공한 실행이 있어야 해요.")
     elif a.cmd == "serve":
-        srv, _ = serve(a.fail_nth, a.late_nth, a.late_seconds)
+        contract = json.loads(Path(a.contract).read_text(encoding="utf-8")) if a.contract else None
+        srv, _ = serve(a.fail_nth, a.late_nth, a.late_seconds, contract=contract)
+        if contract:
+            print(f"계약 사용: {a.contract} ({contract.get('learned_at')}에 배움)")
         print(f"시험용 가짜 목적지 실행 중: {SINK}  (끄려면 Ctrl + C)")
         print(f"실패 설정: {a.fail_nth}번째 쓰기 요청 503" +
               (f", {a.late_nth}번째는 {a.late_seconds}초 늦게 응답" if a.late_nth else ""))

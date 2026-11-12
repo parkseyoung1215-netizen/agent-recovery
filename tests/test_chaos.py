@@ -98,10 +98,6 @@ class Prepare(unittest.TestCase):
         self.assertEqual(wf["nodes"][0]["parameters"]["url"], "https://api.example.com/pay?x=1")  # 원본은 그대로
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class RunCommand(unittest.TestCase):
     """ar.py chaos run: 웹훅으로 워크플로를 실행하고 판정을 종료 코드로 돌려주는지"""
 
@@ -151,3 +147,50 @@ class RunCommand(unittest.TestCase):
         hook = next(n for n in copy["nodes"] if n["name"] == "chaos test trigger")
         self.assertEqual(hook["parameters"]["path"], "chaos-abc")
         self.assertEqual(copy["connections"]["chaos test trigger"], wf["connections"]["start"])
+
+
+class Contract(unittest.TestCase):
+    """EKH1 지적: 가짜 목적지가 실제 API와 달라지면, 테스트는 통과하는데 실제로는 실패한다.
+    → 진짜로 성공한 실행에서 요청 모양을 배워두고, 그와 다른 요청은 가짜 목적지가 거절한다."""
+
+    WF = {"nodes": [{"name": "send", "type": "n8n-nodes-base.httpRequest", "parameters": {
+        "method": "POST", "url": "https://api.example.com/email",
+        "jsonBody": "={{ JSON.stringify({ to: $json.to, amount: $json.amount }) }}"}}], "connections": {}}
+
+    def execution(self, ex_id, items, response):
+        return {"id": ex_id, "data": {"resultData": {"runData": {
+            "src": [{"data": {"main": [[{"json": x} for x in items]]}}],
+            "send": [{"source": [{"previousNode": "src"}], "data": {"main": [[{"json": response}]]}}]}}}}
+
+    def contract(self):
+        exs = [self.execution("1", [{"to": "a@x.com", "amount": 3}], {"id": "msg_1", "status": "queued"}),
+               self.execution("2", [{"to": "b@x.com", "amount": 5}], {"id": "msg_2", "status": "queued"})]
+        return chaos.learn(self.WF, exs)
+
+    def test_learns_fields_types_and_a_real_response(self):
+        c = self.contract()["contracts"]["POST https/api.example.com/email"]
+        self.assertEqual(c["requests"], 2)
+        self.assertEqual(c["fields"]["to"]["types"], ["string"])
+        self.assertEqual(c["fields"]["amount"]["types"], ["number"])
+        self.assertEqual(c["response_example"], {"id": "msg_1", "status": "queued"})
+
+    def test_sink_rejects_drifted_requests_and_fails_the_verdict(self):
+        sink = chaos.Sink(fail_nth=0, late_nth=0, contract=self.contract())
+        path = "/sink/https/api.example.com/email"
+        self.assertEqual(sink.handle("POST", path, {}, json.dumps({"to": "c@x.com", "amount": 1}))[0], 200)
+        self.assertEqual(sink.handle("POST", path, {}, json.dumps({"to": "d@x.com"}))[0], 400)                  # 필드 빠짐
+        self.assertEqual(sink.handle("POST", path, {}, json.dumps({"to": "e@x.com", "amount": "1"}))[0], 400)   # 타입 바뀜
+        self.assertEqual(sink.handle("POST", path, {}, json.dumps({"to": "f@x.com", "amount": 1, "cc": "g"}))[0], 400)  # 새 필드
+        r = sink.report()
+        self.assertEqual(r["판정"], "실패")
+        self.assertTrue(any("계약 위반 3건" in p for p in r["문제"]))
+        self.assertEqual(sink.response_for("POST", path), {"id": "msg_1", "status": "queued"})
+
+    def test_without_contract_everything_is_accepted_as_before(self):
+        sink = chaos.Sink(fail_nth=0, late_nth=0)
+        self.assertEqual(sink.handle("POST", "/sink/https/api.example.com/email", {}, "{}")[0], 200)
+        self.assertEqual(sink.report()["판정"], "통과")
+
+
+if __name__ == "__main__":
+    unittest.main()
