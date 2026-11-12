@@ -209,4 +209,6 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     reset(1)
     print(f"가짜 쇼핑몰 실행 중: http://127.0.0.1:{PORT}/state  (끄려면 Ctrl + C)")
+    # 기본 대기열(5)은 n8n이 50건을 동시에 보낼 때 넘쳐서 연결이 끊길 수 있음 (chaos.py의 Server 참고)
+    ThreadingHTTPServer.request_queue_size = 128
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

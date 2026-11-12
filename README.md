@@ -93,7 +93,7 @@ On a real local n8n 2.46.6, with a 503 injected at request #33 of a 50-email wor
 
 The last row passes only because the sink honors the key, the way a destination that supports idempotency keys would.
 
-Nothing real is sent during the test: every write goes to the sink. Requests that carry the same `Idempotency-Key` twice count as safe retries. Without a key, two identical writes count as a duplicate, which can be a false alarm if your workflow is meant to send the same thing twice.
+Nothing real is sent during the test: every write goes to the sink. Requests that carry the same `Idempotency-Key` twice count as safe retries. Two identical writes (same method, path and body) that were both recorded count as a duplicate, whether they had no key or a key that changed between attempts (for example `{{ $randomUUID }}`). That can be a false alarm if your workflow is meant to send the same thing twice.
 
 ### Tests
 
