@@ -186,6 +186,21 @@ class Contract(unittest.TestCase):
         self.assertTrue(any("계약 위반 3건" in p for p in r["문제"]))
         self.assertEqual(sink.response_for("POST", path), {"id": "msg_1", "status": "queued"})
 
+    def test_contracts_from_two_workflows_merge_per_endpoint(self):
+        a = self.contract()
+        wf2 = json.loads(json.dumps(self.WF))
+        wf2["nodes"][0]["name"] = "notify"
+        wf2["nodes"][0]["parameters"]["jsonBody"] = "={{ JSON.stringify({ to: $json.to, amount: $json.amount, cc: $json.cc }) }}"
+        ex = self.execution("3", [{"to": "z@x.com", "amount": 2, "cc": "y@x.com"}], {"id": "msg_3"})
+        ex["data"]["resultData"]["runData"]["notify"] = ex["data"]["resultData"]["runData"].pop("send")
+        merged = chaos.merge(a, chaos.learn(wf2, [ex]))
+        c = merged["contracts"]["POST https/api.example.com/email"]
+        self.assertEqual(c["requests"], 3)
+        self.assertEqual(c["fields"]["cc"]["seen"], 1)            # 한 워크플로만 씀 → 필수 아님
+        sink = chaos.Sink(fail_nth=0, late_nth=0, contract=merged)
+        self.assertEqual(sink.handle("POST", "/sink/https/api.example.com/email", {}, json.dumps({"to": "q@x.com", "amount": 1}))[0], 200)
+        self.assertEqual(sink.handle("POST", "/sink/https/api.example.com/email", {}, json.dumps({"to": "r@x.com", "amount": 1, "cc": "s"}))[0], 200)
+
     def test_without_contract_everything_is_accepted_as_before(self):
         sink = chaos.Sink(fail_nth=0, late_nth=0)
         self.assertEqual(sink.handle("POST", "/sink/https/api.example.com/email", {}, "{}")[0], 200)

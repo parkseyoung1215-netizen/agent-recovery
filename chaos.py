@@ -18,8 +18,9 @@ https://community.n8n.io/t/327579
         통과면 종료 코드 0, 실패면 1이라 CI에서 그대로 쓸 수 있어요.
   python3 ar.py chaos reset                     기록 지우기 (같은 실패 설정으로 다시 시험)
   python3 ar.py chaos learn <워크플로ID>          실제로 성공한 실행에서 '계약' 배우기
-      → 진짜 API가 성공으로 받아준 요청의 필드·타입과, 진짜 응답의 예시를 contract_<ID>.json에 저장.
-        serve --contract contract_<ID>.json 으로 켜면 가짜 목적지가 그 계약에 없는 모양의 요청을
+      → 진짜 API가 성공으로 받아준 요청의 필드·타입과, 진짜 응답의 예시를 contracts.json에 저장.
+        목적지(메서드+주소)마다 하나라서, 여러 워크플로에서 배운 게 한 파일에 합쳐져요 (kartike 제안).
+        serve --contract contracts.json 으로 켜면 가짜 목적지가 그 계약에 없는 모양의 요청을
         400으로 거절하고(판정 실패), 응답도 진짜 응답 예시를 돌려줘요.
         아이디어 출처: n8n 커뮤니티 EKH1 - "가짜 목적지가 실제 API와 점점 달라지는 게 진짜 문제"
 
@@ -146,6 +147,28 @@ def learn(workflow, executions):
         if c["requests"]:
             contracts[key] = c
     return {"learned_at": datetime.now().strftime("%Y-%m-%d %H:%M"), "contracts": contracts}
+
+
+def merge(shared, new):
+    """API마다 한 번만 기록: 같은 목적지(메서드+주소)는 여러 워크플로에서 배운 걸 합친다. (kartike 제안)"""
+    out = json.loads(json.dumps(shared or {"contracts": {}}))
+    out.setdefault("contracts", {})
+    for key, c in new.get("contracts", {}).items():
+        old = out["contracts"].get(key)
+        if not old:
+            out["contracts"][key] = c
+            continue
+        for f, e in c["fields"].items():
+            o = old["fields"].setdefault(f, {"types": [], "seen": 0})
+            o["seen"] += e["seen"]
+            o["types"] += [t for t in e["types"] if t not in o["types"]]
+        old["requests"] += c["requests"]
+        old["executions"] = sorted(set(old.get("executions", [])) | set(c.get("executions", [])))
+        old["node"] = ", ".join(sorted(set(old["node"].split(", ")) | {c["node"]}))
+        if old.get("response_example") is None:
+            old["response_example"] = c.get("response_example")
+    out["learned_at"] = new.get("learned_at")
+    return out
 
 
 def check_contract(contract, body_text):
@@ -399,10 +422,12 @@ def main(argv=None):
         wf = recover.n8n(f"/workflows/{a.workflow_id}", key)
         lst = recover.n8n(f"/executions?workflowId={a.workflow_id}&status=success&limit={a.limit}", key)
         exs = [recover.n8n(f"/executions/{e['id']}?includeData=true", key) for e in lst.get("data", [])]
-        c = learn(wf, exs)
-        out = Path(a.out or f"contract_{a.workflow_id}.json")
+        new = learn(wf, exs)
+        out = Path(a.out or "contracts.json")
+        shared = json.loads(out.read_text(encoding="utf-8")) if out.exists() else None
+        c = merge(shared, new)
         out.write_text(json.dumps(c, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"성공한 실행 {len(exs)}개에서 배웠어요: {out}")
+        print(f"성공한 실행 {len(exs)}개에서 배워서 {out}에 합쳤어요 (목적지 {len(c['contracts'])}개)")
         for k, v in c["contracts"].items():
             req = [f for f, e in v["fields"].items() if e["seen"] == v["requests"]]
             print(f"  {k}  (요청 {v['requests']}건, 필수 필드: {', '.join(req) or '없음'})")
