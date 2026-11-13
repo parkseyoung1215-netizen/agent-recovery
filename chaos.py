@@ -25,7 +25,8 @@ https://community.n8n.io/t/327579
         아이디어 출처: n8n 커뮤니티 EKH1 - "가짜 목적지가 실제 API와 점점 달라지는 게 진짜 문제"
 
 판정 기준
-  중복: 중복 방지 키(Idempotency-Key) 없이 같은 요청이 두 번 이상 기록됨 → 실패
+  중복: 같은 요청(메서드+경로+본문)이 두 번 이상 기록됨 → 실패. 키가 없을 때뿐 아니라
+        키가 시도마다 바뀔 때도 해당 (같은 키로 다시 온 요청만 기록하지 않음)
   누락: 한 번이라도 시도됐는데 끝내 기록되지 않음 → 실패
   안전한 재시도: 같은 Idempotency-Key로 다시 온 요청 → 기록하지 않고 '중복 방지됨'으로 셈 (진짜 서비스가
                키를 지원할 때의 동작을 흉내 냄)
@@ -213,6 +214,7 @@ class Sink:
             self.n = 0                    # 쓰기 요청 순번
             self.seen = {}                # 요청 식별값 → 첫 시도 정보
             self.recorded = {}            # 요청 식별값 → 기록된 횟수
+            self.written = {}             # 요청 내용(메서드+경로+본문) → 기록된 횟수
             self.deduped = 0              # 같은 키로 다시 와서 무시한 횟수
             self.injected_503 = 0
             self.late = 0
@@ -221,12 +223,13 @@ class Sink:
 
     def handle(self, method, path, headers, body):
         key_header = headers.get("Idempotency-Key")
-        ident = f"key:{key_header}" if key_header else \
-            "body:" + hashlib.sha1(f"{method} {path} {body}".encode()).hexdigest()[:16]
+        content = "body:" + hashlib.sha1(f"{method} {path} {body}".encode()).hexdigest()[:16]
+        ident = f"key:{key_header}" if key_header else content
         with self.lock:
             self.n += 1
             n = self.n
-            self.seen.setdefault(ident, {"path": path, "body": body[:200], "keyed": bool(key_header)})
+            self.seen.setdefault(ident, {"path": path, "body": body[:200], "keyed": bool(key_header),
+                                         "content": content})
             c = self._contract_for(method, path)
             why = check_contract(c, body) if c else []
             if why:
@@ -242,6 +245,7 @@ class Sink:
                 self.log.append((n, ident, "같은 키 → 중복 방지됨"))
                 return 200, 0
             self.recorded[ident] = self.recorded.get(ident, 0) + 1
+            self.written[content] = self.written.get(content, 0) + 1
             delay = self.cfg["late_seconds"] if self.cfg["late_nth"] and n == self.cfg["late_nth"] else 0
             if delay:
                 self.late += 1
@@ -250,11 +254,15 @@ class Sink:
 
     def report(self):
         with self.lock:
-            dups = {k: c for k, c in self.recorded.items() if c > 1}
-            missing = [k for k in self.seen if not self.recorded.get(k)]
+            # 중복은 내용으로 센다: 시도마다 키가 바뀌면(예: $randomUUID) 키로는 서로 다른 요청처럼 보이기 때문
+            dups = {c: n for c, n in self.written.items() if n > 1}
+            example = {v["content"]: v["body"] for v in self.seen.values()}
+            missing = [k for k, v in self.seen.items()
+                       if not self.recorded.get(k) and not self.written.get(v["content"])]
             problems = []
             if dups:
-                problems.append(f"중복 {sum(c - 1 for c in dups.values())}건: 같은 요청이 키 없이 두 번 이상 기록됨 ({len(dups)}개 항목)")
+                problems.append(f"중복 {sum(n - 1 for n in dups.values())}건: 같은 요청이 두 번 이상 기록됨 ({len(dups)}개 항목)."
+                                " 키가 없거나, 키가 시도마다 바뀜")
             if self.violations:
                 problems.append(f"계약 위반 {len(self.violations)}건: 진짜 API가 성공으로 받아준 적 없는 모양의 요청")
             if missing:
@@ -269,7 +277,7 @@ class Sink:
                 "주입한 503": self.injected_503,
                 "늦은 응답": self.late,
                 "중복 방지된 재시도": self.deduped,
-                "중복 예시": [self.seen[k]["body"] for k in list(dups)[:3]],
+                "중복 예시": [example[c] for c in list(dups)[:3]],
                 "누락 예시": [self.seen[k]["body"] for k in missing[:3]],
                 "키를 붙인 항목 비율": f"{sum(1 for v in self.seen.values() if v['keyed'])}/{len(self.seen)}",
                 "계약": (f"{self.contract.get('learned_at')}에 배운 것, {len(self.contract.get('contracts', {}))}개 목적지"
@@ -319,9 +327,16 @@ def make_handler(sink):
     return H
 
 
+class Server(ThreadingHTTPServer):
+    # 기본값 5면 n8n이 50건을 동시에 보낼 때 대기열이 넘쳐서 운영체제가 연결을 끊어요(ECONNRESET).
+    # 그러면 주입하지 않은 실패가 생기고, 끊긴 요청은 기록에도 안 남아서 판정이 틀려져요.
+    request_queue_size = 128
+    daemon_threads = True
+
+
 def serve(fail_nth, late_nth, late_seconds, port=PORT, contract=None):
     sink = Sink(fail_nth, late_nth, late_seconds, contract)
-    srv = ThreadingHTTPServer(("127.0.0.1", port), make_handler(sink))
+    srv = Server(("127.0.0.1", port), make_handler(sink))
     return srv, sink
 
 
@@ -368,6 +383,9 @@ def run(webhook_url, wait=120, settle=3):
             return 2
     except urllib.error.URLError as e:
         print(f"  워크플로를 실행하지 못했어요: {e.reason}")
+        return 2
+    except TimeoutError:                  # 응답을 기다리다 끊긴 경우는 URLError로 감싸지지 않음
+        print(f"  워크플로가 {wait}초 안에 끝나지 않았어요. --wait 을 늘려서 다시 시험하세요.")
         return 2
     time.sleep(settle)
     r = _sink("report")

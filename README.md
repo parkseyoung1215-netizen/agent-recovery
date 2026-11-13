@@ -111,7 +111,7 @@ The last row passes only because the sink honors the key, the way a destination 
 
 **Keeping the sink honest (contract).** A sink that accepts anything can pass a workflow the real API would reject; this was pointed out on the forum by EKH1. `python3 ar.py chaos learn <workflow-id>` reads the workflow's recent successful executions and records, for each write, which fields and types the real API accepted and one real response. Contracts are kept per endpoint in one shared `contracts.json`, so learning from several workflows that call the same API adds up instead of duplicating (suggested by kartike). `chaos serve --contract contracts.json` then answers with that real response and rejects with 400 (and fails the verdict) any request with a missing field, a new field, or a changed type. This is only "the shapes the real API accepted before", not the API's rules: a harmless new field is flagged, and a rule the API changes is missed until you run `learn` again. So far it is covered by unit tests only, not yet run against a real n8n.
 
-Nothing real is sent during the test: every write goes to the sink. Requests that carry the same `Idempotency-Key` twice count as safe retries. Without a key, two identical writes count as a duplicate, which can be a false alarm if your workflow is meant to send the same thing twice.
+Nothing real is sent during the test: every write goes to the sink. Requests that carry the same `Idempotency-Key` twice count as safe retries. Two identical writes (same method, path and body) that were both recorded count as a duplicate, whether they had no key or a key that changed between attempts (for example `{{ $randomUUID }}`). That can be a false alarm if your workflow is meant to send the same thing twice.
 
 ### Tests
 

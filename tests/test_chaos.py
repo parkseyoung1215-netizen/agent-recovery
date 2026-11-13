@@ -7,7 +7,9 @@ n8n HTTP 노드의 동작을 흉내 냄:
 import json
 import sys
 import threading
+import time
 import unittest
+import uuid
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -19,11 +21,11 @@ import chaos  # noqa: E402
 
 
 def run_node(base, items, keyed, tries, timeout=3):
-    """HTTP 노드 한 개를 흉내 냄. 모든 항목이 성공하면 True."""
+    """HTTP 노드 한 개를 흉내 냄. 모든 항목이 성공하면 True. keyed="random"이면 시도마다 새 키."""
     def one(to):
         headers = {"Content-Type": "application/json"}
         if keyed:
-            headers["Idempotency-Key"] = f"order-confirm-{to}"
+            headers["Idempotency-Key"] = str(uuid.uuid4()) if keyed == "random" else f"order-confirm-{to}"
         req = urllib.request.Request(base + "https/api.example.com/email", method="POST",
                                      data=json.dumps({"to": to}).encode(), headers=headers)
         try:
@@ -33,7 +35,9 @@ def run_node(base, items, keyed, tries, timeout=3):
             return False
     for _ in range(tries):
         with ThreadPoolExecutor(max_workers=10) as ex:
-            if all(ex.map(one, items)):
+            # list(): n8n은 모든 항목의 응답을 기다린 뒤에 실패를 처리한다. all(ex.map(...))은 첫 실패에서
+            # 멈추면서 아직 시작 안 한 요청을 취소해서, 보낸 건수가 실행할 때마다 달라졌다.
+            if all(list(ex.map(one, items))):
                 return True
     return False
 
@@ -78,6 +82,30 @@ class ChaosVerdicts(unittest.TestCase):
         base, sink = self.start(fail_nth=0, late_nth=20, late_seconds=5)
         run_node(base, self.ITEMS, keyed=True, tries=3, timeout=2)
         self.assertEqual(sink.report()["판정"], "통과")
+
+    def test_key_that_changes_on_every_attempt_is_still_a_duplicate(self):
+        # 예: Idempotency-Key 를 {{ $randomUUID }} 처럼 시도마다 새로 만드는 워크플로
+        base, sink = self.start(fail_nth=33, late_nth=0, late_seconds=0)
+        run_node(base, self.ITEMS, keyed="random", tries=3)
+        r = sink.report()
+        self.assertEqual(r["판정"], "실패")
+        self.assertIn("중복 49건", r["문제"][0])
+        self.assertEqual(len(r["문제"]), 1, r["문제"])     # 다시 보낸 1건은 결국 기록됐으니 누락이 아님
+
+    def test_sink_takes_a_burst_of_concurrent_requests(self):
+        # n8n은 항목을 동시에 보낸다. 대기열이 작으면 연결이 끊겨서 주입하지 않은 실패가 생긴다.
+        base, sink = self.start(fail_nth=0, late_nth=0, late_seconds=0)
+
+        def one(i):
+            req = urllib.request.Request(base + "x", method="POST", data=json.dumps({"i": i}).encode())
+            try:
+                return urllib.request.urlopen(req, timeout=5).status
+            except Exception as e:
+                return repr(e)
+        with ThreadPoolExecutor(max_workers=50) as ex:
+            got = list(ex.map(one, range(200)))
+        self.assertEqual([g for g in got if g != 200], [])
+        self.assertEqual(sink.report()["쓰기 요청 수"], 200)
 
 
 class Prepare(unittest.TestCase):
@@ -148,6 +176,22 @@ class RunCommand(unittest.TestCase):
         self.assertEqual(hook["parameters"]["path"], "chaos-abc")
         self.assertEqual(copy["connections"]["chaos test trigger"], wf["connections"]["start"])
 
+    def test_workflow_slower_than_wait_cannot_be_judged(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class Slow(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                time.sleep(3)
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), Slow)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        url = f"http://127.0.0.1:{srv.server_address[1]}/webhook/chaos-slow"
+        self.assertEqual(chaos.run(url, wait=1, settle=0), 2)   # 예전에는 TimeoutError로 죽어서 종료 코드 1
+
 
 class Contract(unittest.TestCase):
     """EKH1 지적: 가짜 목적지가 실제 API와 달라지면, 테스트는 통과하는데 실제로는 실패한다.
@@ -217,6 +261,7 @@ class NoApiKey(unittest.TestCase):
         self.assertEqual(wfs[0]["id"], "exp2_timeout_workflow")
         kinds = [f[2] for f in check.check_workflow(wfs[0], {})]
         self.assertTrue(any("HTTP" in k for k in kinds))
+
 
 if __name__ == "__main__":
     unittest.main()
