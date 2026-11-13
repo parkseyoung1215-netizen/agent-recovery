@@ -279,6 +279,7 @@ class Contract(unittest.TestCase):
         r = sink.report()
         self.assertEqual(r["판정"], "실패")
         self.assertTrue(any("계약 위반 3건" in p for p in r["문제"]))
+        self.assertFalse(any("누락" in p for p in r["문제"]), r["문제"])   # 거절한 걸 누락으로 또 세지 않음
         self.assertEqual(sink.response_for("POST", path), {"id": "msg_1", "status": "queued"})
 
     def test_contracts_from_two_workflows_merge_per_endpoint(self):

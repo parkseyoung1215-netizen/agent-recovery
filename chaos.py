@@ -260,7 +260,7 @@ class Sink:
             c = self._contract_for(method, path)
             why = check_contract(c, body) if c else []
             if why:
-                self.violations.append({"body": body[:200], "why": why})
+                self.violations.append({"body": body[:200], "why": why, "ident": ident})
                 self.log.append((n, ident, "계약 위반 → 400"))
                 return 400, 0
             if self.cfg["fail_nth"] and n == self.cfg["fail_nth"]:
@@ -284,8 +284,9 @@ class Sink:
             # 중복은 내용으로 센다: 시도마다 키가 바뀌면(예: $randomUUID) 키로는 서로 다른 요청처럼 보이기 때문
             dups = {c: n for c, n in self.written.items() if n > 1}
             example = {v["content"]: v["body"] for v in self.seen.values()}
+            rejected = {v["ident"] for v in self.violations}   # 계약 위반으로 거절한 건 '누락'으로 또 세지 않음
             missing = [k for k, v in self.seen.items()
-                       if not self.recorded.get(k) and not self.written.get(v["content"])]
+                       if not self.recorded.get(k) and not self.written.get(v["content"]) and k not in rejected]
             problems = []
             if dups:
                 problems.append(f"중복 {sum(n - 1 for n in dups.values())}건: 같은 요청이 두 번 이상 기록됨 ({len(dups)}개 항목)."
@@ -389,9 +390,16 @@ def print_report(r):
         print("중복 예시:", *r["중복 예시"], sep="\n  ")
     if r["누락 예시"]:
         print("누락 예시:", *r["누락 예시"], sep="\n  ")
-    if r["판정"] == "실패":
+    kinds = " ".join(r["문제"])
+    if "중복" in kinds or "누락" in kinds or "키 공유" in kinds:
         print("\n고치는 방법 예: 쓰기 요청에 항목마다 고정된 Idempotency-Key 헤더를 붙이고(상대 서비스가 지원할 때),"
               "\n자동 재시도는 키가 있을 때만 켜세요. 키를 지원하지 않는 서비스면 ar.py check / recover로 사람이 확인하게 하세요.")
+    if "계약 위반" in kinds:
+        print("\n계약 위반: 진짜 서비스가 지금까지 받아준 것과 요청 모양이 달라요. 워크플로를 바꾼 게 맞다면"
+              "\n진짜 서비스로 한 번 성공시킨 뒤 chaos learn을 다시 하고, 실수라면 요청 본문을 원래대로 고치세요.")
+    if "미시도" in kinds:
+        print("\n미시도: 워크플로가 중간에 멈춰서 일부 항목은 아예 보내지지 않았어요. 실패한 노드 뒤에서 멈추지 않게 하거나,"
+              "\n멈춘 항목을 이어서 보낼 방법(ar.py recover)이 필요해요.")
 
 
 def _sink(path, timeout=5):
@@ -500,7 +508,7 @@ def main(argv=None):
         if contract:
             print(f"계약 사용: {a.contract} ({contract.get('learned_at')}에 배움)")
         print(f"시험용 가짜 목적지 실행 중: {SINK}  (끄려면 Ctrl + C)")
-        print(f"실패 설정: {a.fail_nth}번째 쓰기 요청 503" +
+        print(("실패 설정: 일부러 넣는 503 없음" if not a.fail_nth else f"실패 설정: {a.fail_nth}번째 쓰기 요청 503") +
               (f", {a.late_nth}번째는 {a.late_seconds}초 늦게 응답" if a.late_nth else ""))
         srv.serve_forever()
     elif a.cmd == "run":
