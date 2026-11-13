@@ -163,16 +163,31 @@ def check_workflow(wf, counts):
 ORDER = {"높음": 0, "중간": 1, "낮음": 2}
 
 
+def load_files(paths):
+    """n8n에서 내보낸 워크플로 JSON 파일 읽기 (API 키 필요 없음). 파일 하나에 여러 개가 들어 있어도 됨."""
+    wfs = []
+    for p in paths:
+        data = json.loads(Path(p).read_text(encoding="utf-8"))
+        for i, wf in enumerate(data if isinstance(data, list) else [data]):
+            wf.setdefault("id", f"{Path(p).stem}" + (f"#{i + 1}" if isinstance(data, list) else ""))
+            wfs.append(wf)
+    return wfs
+
+
 def main():
-    key = load_api_key()
-    if len(sys.argv) > 1:
-        wfs = [n8n(f"/workflows/{sys.argv[1]}", key)]
+    args = sys.argv[1:]
+    files = [a for a in args if a.endswith(".json") and Path(a).exists()]
+    if files:
+        key = None
+        wfs = load_files(files)
+        print("파일에서 읽음 (n8n API 키 없이). 실행 기록이 없어서 '한 번에 몇 개를 보내는지'는 확인하지 못해요.")
     else:
-        wfs = all_workflows(key)
+        key = load_api_key()
+        wfs = [n8n(f"/workflows/{args[0]}", key)] if args else all_workflows(key)
     total = {"높음": 0, "중간": 0, "낮음": 0}
     print(f"워크플로 {len(wfs)}개 점검\n")
     for wf in sorted(wfs, key=lambda w: w.get("name", "")):
-        findings = check_workflow(wf, last_item_counts(wf["id"], key))
+        findings = check_workflow(wf, last_item_counts(wf["id"], key) if key else {})
         if not findings:
             print(f"✓ {wf['name']}  (문제 없음)\n")
             continue

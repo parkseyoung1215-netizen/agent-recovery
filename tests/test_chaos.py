@@ -207,5 +207,16 @@ class Contract(unittest.TestCase):
         self.assertEqual(sink.report()["판정"], "통과")
 
 
+
+class NoApiKey(unittest.TestCase):
+    """n8n에서 내보낸 JSON 파일만으로 점검할 수 있어야 함 (API 키 없이 써보기 쉽게)"""
+
+    def test_check_reads_exported_files(self):
+        import check
+        wfs = check.load_files([str(ROOT / "experiments" / "exp2_timeout_workflow.json")])
+        self.assertEqual(wfs[0]["id"], "exp2_timeout_workflow")
+        kinds = [f[2] for f in check.check_workflow(wfs[0], {})]
+        self.assertTrue(any("HTTP" in k for k in kinds))
+
 if __name__ == "__main__":
     unittest.main()

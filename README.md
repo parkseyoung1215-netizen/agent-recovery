@@ -48,6 +48,20 @@ Design rules:
 - **A human approves anything that sends, pays or ships.**
 - **n8n is only read.** A read-only n8n API key is enough.
 
+## Try it without an API key
+
+Export a workflow from n8n (⋯ menu → Download), then:
+
+```bash
+python3 ar.py check my_workflow.json           # flags risky retry / timeout / missing-key settings
+python3 ar.py chaos prepare my_workflow.json   # test copy whose HTTP writes go to a local sink
+python3 ar.py chaos serve --fail-nth 33        # in another terminal
+# import chaos_my_workflow.json into n8n, publish it, then:
+python3 ar.py chaos run http://127.0.0.1:5678/webhook/chaos-my_workflow
+```
+
+Python 3 only, no packages. Without an API key, `check` can't see how many items a node sent last time, so it can't flag large batches.
+
 ## Try it
 
 Requirements: Python 3 (standard library only), n8n running locally (`npx n8n`), and a read-only n8n API key.

@@ -4,7 +4,7 @@
 아이디어 출처: n8n 커뮤니티 ccch713 - "일부러 실패를 넣는 테스트를 워크플로를 바꿀 때마다 돌린다"
 https://community.n8n.io/t/327579
 
-  python3 ar.py chaos prepare <워크플로ID>     시험용 복사본(JSON) 만들기
+  python3 ar.py chaos prepare <워크플로ID 또는 내보낸.json>   시험용 복사본(JSON) 만들기 (파일이면 API 키 필요 없음)
       → HTTP 쓰기 요청이 진짜 서비스 대신 시험용 가짜 목적지(127.0.0.1:8200)로 가도록 바꾼 복사본.
         n8n에 붙여넣어서 실행하면 돼요. 시험 중에는 진짜 메일·결제가 절대 나가지 않아요.
   python3 ar.py chaos serve [옵션]              시험용 가짜 목적지 켜기
@@ -402,8 +402,14 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     if a.cmd == "prepare":
-        import recover
-        wf = recover.n8n(f"/workflows/{a.workflow_id}", recover.load_api_key())
+        src = Path(a.workflow_id)
+        if src.suffix == ".json" and src.exists():      # n8n에서 내보낸 파일이면 API 키 없이
+            wf = json.loads(src.read_text(encoding="utf-8"))
+            wf.setdefault("id", src.stem)
+            a.workflow_id = str(wf["id"])
+        else:
+            import recover
+            wf = recover.n8n(f"/workflows/{a.workflow_id}", recover.load_api_key())
         copy, changed, skipped = prepare(wf)
         out = Path(a.out or f"chaos_{a.workflow_id}.json")
         out.write_text(json.dumps(copy, ensure_ascii=False, indent=2), encoding="utf-8")
