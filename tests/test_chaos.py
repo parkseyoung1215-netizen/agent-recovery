@@ -215,6 +215,18 @@ class RunCommand(unittest.TestCase):
         self.assertEqual(hook["parameters"]["path"], "chaos-abc")
         self.assertEqual(copy["connections"]["chaos test trigger"], wf["connections"]["start"])
 
+    def test_prepare_moves_an_original_webhook_so_both_can_be_active(self):
+        wf = {"id": "w1", "name": "orders", "nodes": [
+            {"name": "hook", "type": "n8n-nodes-base.webhook", "webhookId": "abc", "parameters": {"path": "orders"}},
+            {"name": "send", "type": "n8n-nodes-base.httpRequest", "parameters": {"method": "POST", "url": "https://x.com/a"}},
+        ], "connections": {"hook": {"main": [[{"node": "send", "type": "main", "index": 0}]]}}}
+        copy, _, _ = chaos.prepare(wf)
+        hooks = {n["name"]: n for n in copy["nodes"] if n["type"] == "n8n-nodes-base.webhook"}
+        self.assertEqual(hooks["hook"]["parameters"]["path"], "orders-chaos-copy")
+        self.assertNotIn("webhookId", hooks["hook"])
+        self.assertEqual(hooks["chaos test trigger"]["parameters"]["path"], "chaos-w1")
+        self.assertEqual(wf["nodes"][0]["parameters"]["path"], "orders")      # 원본은 그대로
+
     def test_workflow_slower_than_wait_cannot_be_judged(self):
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 

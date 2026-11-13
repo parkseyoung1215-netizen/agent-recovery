@@ -81,6 +81,13 @@ def prepare(workflow):
         u = urllib.parse.urlparse(url)
         p["url"] = f"{SINK}{u.scheme}/{u.netloc}{u.path}" + (f"?{u.query}" if u.query else "")
         changed.append(f"{node['name']}: {method} {url} → {p['url']}")
+    # 원래 트리거가 웹훅이면 복사본에서는 주소를 바꾼다. 같은 주소면 원본이 켜져 있는 동안 n8n이 복사본을 켜지 못함
+    for node in wf.get("nodes", []):
+        if node.get("type") == "n8n-nodes-base.webhook" and node.get("name") != "chaos test trigger":
+            p = node.setdefault("parameters", {})
+            p["path"] = f"{p.get('path') or node['name']}-chaos-copy"
+            node.pop("webhookId", None)
+            changed.append(f"{node['name']}: 원래 웹훅 주소를 '{p['path']}'로 바꿈 (원본과 겹치지 않게)")
     add_test_trigger(wf)
     keep = {"name", "nodes", "connections", "settings"}
     wf = {k: v for k, v in wf.items() if k in keep}
