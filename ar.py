@@ -5,6 +5,7 @@
   python3 ar.py recover <실행ID>      실패한 실행 하나를 직접 복구 (--yes 면 확인 없이)
   python3 ar.py list                 최근 실패한 실행 목록
   python3 ar.py services             services.json에 등록된 서비스 보기
+  python3 ar.py resolve <실행ID> <항목값> --sent|--skip   사람이 확인한 결정을 기록 (다음엔 다시 묻지 않음)
   python3 ar.py chaos ...            배포 전 실패 주입 테스트 (prepare / serve / report / reset)
 
 필요한 것: 같은 폴더의 .env 파일에 N8N_API_KEY=... (n8n 읽기 전용 키면 충분)
@@ -36,6 +37,22 @@ def main():
         import recover
         sys.argv = ["recover.py", "--list"]
         recover.main()
+    elif cmd == "resolve":
+        import argparse
+        import recover
+        ap = argparse.ArgumentParser(prog="ar.py resolve")
+        ap.add_argument("execution_id")
+        ap.add_argument("item")
+        g = ap.add_mutually_exclusive_group(required=True)
+        g.add_argument("--sent", action="store_true", help="사람이 직접 보냈거나 도착을 확인함")
+        g.add_argument("--skip", action="store_true", help="보내지 않기로 함")
+        ap.add_argument("--note", default="")
+        a = ap.parse_args(rest)
+        try:
+            job = recover.resolve(a.execution_id, a.item, "sent" if a.sent else "skip", a.note)
+        except (ValueError, KeyError, FileNotFoundError) as e:
+            sys.exit(str(e))
+        print(f"기록했어요: {job}\n다음 recover/watch는 이 항목을 '사람이 처리함'으로 보고 다시 묻거나 보내지 않아요.")
     elif cmd == "chaos":
         import chaos
         chaos.main(rest)

@@ -225,6 +225,35 @@ def mark(job_key, state, **extra):
     p.write_text(json.dumps(rec, ensure_ascii=False))
 
 
+def claim_record(job_key):
+    p = _claim_path(job_key)
+    return json.loads(p.read_text()) if p.exists() else None
+
+
+DECISIONS = {"sent": "사람이 직접 보냈거나 도착을 확인함", "skip": "사람이 보내지 않기로 함"}
+
+
+def resolve(ex_id, ident, decision, note="", who=None):
+    """사람이 확인 파일을 보고 내린 결정을 기록에 남긴다. 다음 실행은 이 항목을 다시 묻지도 보내지도 않는다.
+    (BorkoB 질문: 손으로 다시 보낸 결정이 기록으로 돌아가는가?)"""
+    if decision not in DECISIONS:
+        raise ValueError(f"결정은 {', '.join(DECISIONS)} 중 하나여야 해요")
+    review = REVIEW_DIR / f"{ex_id}.json"
+    if not review.exists():
+        raise FileNotFoundError(f"실행 {ex_id}의 확인 파일이 없어요 ({review}). 먼저 recover로 계획을 만드세요.")
+    items = {str(x["id"]): x for x in json.loads(review.read_text())}
+    if str(ident) not in items:
+        raise KeyError(f"확인 파일에 {ident}가 없어요. 있는 항목: {', '.join(items)}")
+    url = items[str(ident)]["first_attempt_request"]["url"]
+    job = f"{ex_id}:{url}:{ident}"
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    claim(job, worker="human")                  # 기록이 없으면 만든다 (이미 있으면 그대로 둠)
+    mark(job, "resolved", resolution={
+        "decision": decision, "meaning": DECISIONS[decision], "note": note,
+        "by": who or os.environ.get("USER", "unknown"), "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
+    return job
+
+
 def claim_state(job_key):
     p = _claim_path(job_key)
     return json.loads(p.read_text()).get("state") if p.exists() else None
@@ -290,8 +319,13 @@ def make_plan(execution, workflow, min_age=0, ex_id=None):
         status = decide(failure, found, age, lookup_mode=mode, settle=settle,
                         keyed_first_attempt=bool(svc.get("idempotent_first_attempt")))
         # 이전 복구 시도의 기록이 남아 있으면(예: 'sending'에서 멈춤) 다시 보내지 않고 사람에게
-        prior = claim_state(f"{ex_id or execution.get('id')}:{url}:{ident}")
-        if prior and status != "이미 처리됨":
+        rec = claim_record(f"{ex_id or execution.get('id')}:{url}:{ident}")
+        prior = rec.get("state") if rec else None
+        if prior == "resolved":
+            r = rec.get("resolution", {})
+            status = "사람이 처리함"            # 사람의 결정이 조회 결과보다 우선: 다시 묻지도, 보내지도 않음
+            note = f"{r.get('meaning')} ({r.get('by')}, {r.get('at')})" + (f": {r['note']}" if r.get("note") else "")
+        elif prior and status != "이미 처리됨":
             status = "확인 불가"
             note = f"이전 복구 기록이 '{prior}' 상태로 남아 있음"
         elif status == "확인 불가" and found is None:
@@ -347,6 +381,7 @@ def show(plan):
     todo = [x for x in plan["plan"] if x["status"] == "다시 보내야 함"]
     unknown = [x for x in plan["plan"] if x["status"] == "확인 불가"]
     waiting = [x for x in plan["plan"] if x["status"] == "확인 대기"]
+    human = [x for x in plan["plan"] if x["status"] == "사람이 처리함"]
     print(f"\n실패한 노드: {plan['node']}  ({plan['method']} {plan['url']})")
     print(f"n8n 에러: {plan['error']}")
     print(f"항목 {len(plan['plan'])}개를 하나씩 조회한 결과:")
@@ -355,6 +390,10 @@ def show(plan):
     if unknown:
         print(f"  확인 불가       {len(unknown):>3}개  → 써졌는지 확신할 수 없어 보내지 않음 (사람이 확인 필요)")
     for x in unknown:
+        print(f"    - {plan['field']}={x['id']}: {x.get('note')}")
+    if human:
+        print(f"  사람이 처리함   {len(human):>3}개  → 기록된 사람의 결정대로 둠 (다시 묻지 않음)")
+    for x in human:
         print(f"    - {plan['field']}={x['id']}: {x.get('note')}")
     if waiting:
         print(f"  확인 대기       {len(waiting):>3}개  → 기록이 늦게 반영될 수 있어 {plan['settle']}초 뒤 다시 조회해야 함")
@@ -396,6 +435,7 @@ def main():
     review = write_review(plan, ex_id)
     if review:
         print(f"사람 확인용 기록: {review}")
+        print(f"확인한 뒤 결정을 남기세요: python3 ar.py resolve {ex_id} <항목값> --sent (보냈음/도착 확인) 또는 --skip (안 보냄)")
     if not todo:
         rest = [x for x in plan["plan"] if x["status"] != "이미 처리됨"]
         if rest:

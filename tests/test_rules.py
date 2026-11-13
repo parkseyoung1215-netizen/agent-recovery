@@ -210,6 +210,31 @@ class RestartAfterSending(unittest.TestCase):
         self.assertIn("다시 만든 것", rec["first_attempt_request"]["source"])
         self.assertEqual(rec["recovery_attempt"]["request"]["body"], {"to": "customer20@example.com"})
 
+    def test_human_decision_goes_back_into_the_record(self):
+        """BorkoB 질문: 사람이 확인 파일을 보고 손으로 보낸 뒤, 다음 실행이 다시 묻지 않는가"""
+        recover.REVIEW_DIR = Path(self.tmp.name) / "review"
+        job = "80:http://x/email:customer20@example.com"
+        recover.claim(job)
+        recover.mark(job, "sending")                      # 보내다 멈춤 → 사람에게
+        plan = recover.make_plan(self._execution(), self._workflow(), ex_id="80")
+        self.assertEqual(plan["plan"][0]["status"], "확인 불가")
+        recover.write_review(plan, "80")
+        recover.resolve("80", "customer20@example.com", "sent", note="Gmail에서 보낸 편지함 확인", who="seyoung")
+        plan = recover.make_plan(self._execution(), self._workflow(), ex_id="80")
+        x = plan["plan"][0]
+        self.assertEqual(x["status"], "사람이 처리함")    # 조회는 여전히 '없음'이지만 사람의 결정이 우선
+        self.assertIn("seyoung", x["note"])
+        self.assertIsNone(recover.write_review(plan, "80"))   # 더 이상 사람에게 넘길 게 없음
+        r = recover.send_items([x for x in plan["plan"] if x["status"] == "다시 보내야 함"], plan, "80")
+        self.assertEqual((r["sent"], self.sent), (0, []))
+
+    def test_resolve_needs_a_review_file_and_a_known_item(self):
+        recover.REVIEW_DIR = Path(self.tmp.name) / "review"
+        with self.assertRaises(FileNotFoundError):
+            recover.resolve("81", "x@example.com", "skip")
+        with self.assertRaises(ValueError):
+            recover.resolve("81", "x@example.com", "maybe")
+
 class FakeShopIntegration(unittest.TestCase):
     """실험 7 상황: customer10은 503(안 써짐), customer20은 써졌지만 타임아웃, 조회는 8초 늦게 반영."""
 
