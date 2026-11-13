@@ -108,6 +108,45 @@ class ChaosVerdicts(unittest.TestCase):
         self.assertEqual(sink.report()["쓰기 요청 수"], 200)
 
 
+class FalsePassesFromIssue2(unittest.TestCase):
+    """feversoul(이슈 #2)이 찾은, 실패해야 하는데 통과하던 세 경우"""
+    PATH = "/sink/https/api.example.com/email"
+
+    def send(self, sink, body, key=None):
+        return sink.handle("POST", self.PATH, {"Idempotency-Key": key} if key else {}, json.dumps(body))[0]
+
+    def test_one_key_shared_by_different_items_fails(self):
+        sink = chaos.Sink(fail_nth=0, late_nth=0)
+        for i in range(5):
+            self.send(sink, {"to": f"c{i}@x.com"}, key="exec-1234")
+        r = sink.report()
+        self.assertEqual(r["판정"], "실패")
+        self.assertTrue(any("키 공유 4건" in p for p in r["문제"]), r["문제"])
+
+    def test_volatile_body_without_key_is_caught_with_id_field(self):
+        for id_field, verdict in ((None, "통과"), ("to", "실패")):
+            sink = chaos.Sink(fail_nth=0, late_nth=0, id_field=id_field)
+            for attempt in range(2):
+                for i in range(3):
+                    self.send(sink, {"to": f"c{i}@x.com", "sent_at": time.time() + attempt})
+            self.assertEqual(sink.report()["판정"], verdict, id_field)
+
+    def test_items_never_attempted_count_with_expect(self):
+        sink = chaos.Sink(fail_nth=0, late_nth=0, expect=50)
+        for i in range(20):
+            self.send(sink, {"to": f"c{i}@x.com"})
+        r = sink.report()
+        self.assertEqual(r["판정"], "실패")
+        self.assertTrue(any("미시도 30건" in p for p in r["문제"]), r["문제"])
+
+    def test_same_key_same_item_retry_is_still_safe(self):
+        sink = chaos.Sink(fail_nth=0, late_nth=0, expect=3)
+        for _ in range(2):
+            for i in range(3):
+                self.send(sink, {"to": f"c{i}@x.com"}, key=f"k-{i}")
+        self.assertEqual(sink.report()["판정"], "통과")
+
+
 class Prepare(unittest.TestCase):
     def test_rewrites_only_literal_write_urls(self):
         wf = {"name": "orders", "id": "x", "active": True, "nodes": [

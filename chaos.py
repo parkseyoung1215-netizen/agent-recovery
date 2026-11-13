@@ -28,6 +28,10 @@ https://community.n8n.io/t/327579
   중복: 같은 요청(메서드+경로+본문)이 두 번 이상 기록됨 → 실패. 키가 없을 때뿐 아니라
         키가 시도마다 바뀔 때도 해당 (같은 키로 다시 온 요청만 기록하지 않음)
   누락: 한 번이라도 시도됐는데 끝내 기록되지 않음 → 실패
+  키 공유: 서로 다른 요청이 같은 Idempotency-Key를 씀 (예: 실행 ID를 키로 씀) → 실패
+  미시도: --expect N 을 주면, N건 중 아예 시도되지 않은 항목도 실패로 셈
+  (--id-field to 를 주면 본문 전체 대신 그 필드로 항목을 구분: 본문에 시각처럼 매번 바뀌는 값이 있을 때)
+  (세 가지 모두 feversoul이 찾아준 '통과하면 안 되는데 통과하던' 경우)
   안전한 재시도: 같은 Idempotency-Key로 다시 온 요청 → 기록하지 않고 '중복 방지됨'으로 셈 (진짜 서비스가
                키를 지원할 때의 동작을 흉내 냄)
 
@@ -194,11 +198,24 @@ def check_contract(contract, body_text):
 
 # ---------------- 시험용 가짜 목적지 ----------------
 class Sink:
-    def __init__(self, fail_nth=33, late_nth=0, late_seconds=10, contract=None):
+    def __init__(self, fail_nth=33, late_nth=0, late_seconds=10, contract=None, id_field=None, expect=0):
         self.cfg = {"fail_nth": fail_nth, "late_nth": late_nth, "late_seconds": late_seconds}
+        self.id_field = id_field          # 항목을 본문 전체 대신 이 필드로 구분 (본문에 시각 등이 섞여 있을 때)
+        self.expect = expect              # 보내져야 할 항목 수. 아예 시도도 안 된 항목을 누락으로 잡기 위해
         self.contract = contract or {}
         self.lock = threading.Lock()
         self.reset()
+
+    def _item_of(self, body):
+        """중복을 셀 때 쓰는 항목 식별값: --id-field가 있으면 그 필드 값, 없으면 본문 전체"""
+        if self.id_field:
+            try:
+                v = json.loads(body).get(self.id_field)
+                if v is not None:
+                    return f"{self.id_field}={v}"
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        return body
 
     def _contract_for(self, method, path):
         rest = path.split("?", 1)[0]
@@ -215,6 +232,7 @@ class Sink:
             self.seen = {}                # 요청 식별값 → 첫 시도 정보
             self.recorded = {}            # 요청 식별값 → 기록된 횟수
             self.written = {}             # 요청 내용(메서드+경로+본문) → 기록된 횟수
+            self.key_bodies = {}          # 키 → 그 키로 온 서로 다른 내용들 (키 하나를 여러 항목이 같이 쓰는지)
             self.deduped = 0              # 같은 키로 다시 와서 무시한 횟수
             self.injected_503 = 0
             self.late = 0
@@ -223,13 +241,15 @@ class Sink:
 
     def handle(self, method, path, headers, body):
         key_header = headers.get("Idempotency-Key")
-        content = "body:" + hashlib.sha1(f"{method} {path} {body}".encode()).hexdigest()[:16]
+        content = "body:" + hashlib.sha1(f"{method} {path} {self._item_of(body)}".encode()).hexdigest()[:16]
         ident = f"key:{key_header}" if key_header else content
         with self.lock:
             self.n += 1
             n = self.n
             self.seen.setdefault(ident, {"path": path, "body": body[:200], "keyed": bool(key_header),
                                          "content": content})
+            if key_header:
+                self.key_bodies.setdefault(key_header, {}).setdefault(content, body[:200])
             c = self._contract_for(method, path)
             why = check_contract(c, body) if c else []
             if why:
@@ -263,6 +283,14 @@ class Sink:
             if dups:
                 problems.append(f"중복 {sum(n - 1 for n in dups.values())}건: 같은 요청이 두 번 이상 기록됨 ({len(dups)}개 항목)."
                                 " 키가 없거나, 키가 시도마다 바뀜")
+            shared = {k: v for k, v in self.key_bodies.items() if len(v) > 1}
+            if shared:
+                problems.append(f"키 공유 {sum(len(v) - 1 for v in shared.values())}건: 서로 다른 요청이 같은 Idempotency-Key를 씀"
+                                f" ({len(shared)}개 키). 진짜 서비스는 뒤에 온 것을 중복으로 보고 버리거나 거절해요")
+            distinct = len({v["content"] for v in self.seen.values()})
+            never = max(self.expect - distinct, 0) if self.expect else 0
+            if never:
+                problems.append(f"미시도 {never}건: {self.expect}건이 보내져야 하는데 {distinct}건만 시도됨 (워크플로가 중간에 멈춤)")
             if self.violations:
                 problems.append(f"계약 위반 {len(self.violations)}건: 진짜 API가 성공으로 받아준 적 없는 모양의 요청")
             if missing:
@@ -334,8 +362,8 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
 
 
-def serve(fail_nth, late_nth, late_seconds, port=PORT, contract=None):
-    sink = Sink(fail_nth, late_nth, late_seconds, contract)
+def serve(fail_nth, late_nth, late_seconds, port=PORT, contract=None, id_field=None, expect=0):
+    sink = Sink(fail_nth, late_nth, late_seconds, contract, id_field, expect)
     srv = Server(("127.0.0.1", port), make_handler(sink))
     return srv, sink
 
@@ -407,6 +435,8 @@ def main(argv=None):
     p2.add_argument("--late-nth", type=int, default=0)
     p2.add_argument("--late-seconds", type=int, default=10)
     p2.add_argument("--contract", help="chaos learn으로 만든 계약 파일")
+    p2.add_argument("--id-field", help="항목을 이 본문 필드로 구분 (예: to). 본문에 시각처럼 매번 바뀌는 값이 있을 때")
+    p2.add_argument("--expect", type=int, default=0, help="보내져야 할 항목 수. 시도조차 안 된 항목도 누락으로 잡음")
     p4 = sub.add_parser("learn")
     p4.add_argument("workflow_id")
     p4.add_argument("--limit", type=int, default=20, help="최근 성공한 실행 몇 개에서 배울지")
@@ -459,7 +489,7 @@ def main(argv=None):
             print("  배울 게 없어요. 진짜 서비스로 성공한 실행이 있어야 해요.")
     elif a.cmd == "serve":
         contract = json.loads(Path(a.contract).read_text(encoding="utf-8")) if a.contract else None
-        srv, _ = serve(a.fail_nth, a.late_nth, a.late_seconds, contract=contract)
+        srv, _ = serve(a.fail_nth, a.late_nth, a.late_seconds, contract=contract, id_field=a.id_field, expect=a.expect)
         if contract:
             print(f"계약 사용: {a.contract} ({contract.get('learned_at')}에 배움)")
         print(f"시험용 가짜 목적지 실행 중: {SINK}  (끄려면 Ctrl + C)")
