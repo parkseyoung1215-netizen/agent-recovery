@@ -287,6 +287,21 @@ def send_items(todo, plan, ex_id, worker="cli"):
 
 # ---------- 복구 계획 ----------
 def make_plan(execution, workflow, min_age=0, ex_id=None):
+    """판단 기준은 '실행 당시'의 워크플로 정의.
+
+    실행 뒤에 누가 노드 주소를 바꾸면, 지금 정의로는 이미 해결된 항목을 새 주소로 다시
+    보내자고 제안하게 된다 (sameday가 찾음). 그래서:
+      - n8n이 실행에 당시 정의(workflowData)를 담아주면 (2.47.7+) 그걸 쓴다.
+      - 없으면 지금 정의를 쓰되, 실행 시작 이후에 워크플로가 수정됐으면
+        '다시 보내야 함'을 전부 '확인 불가'로 낮춰 사람에게 넘긴다. 추측으로 보내지 않는다.
+    """
+    snapshot = execution.get("workflowData")
+    if snapshot and snapshot.get("nodes"):
+        workflow, stale = snapshot, False
+    else:
+        started = execution.get("startedAt") or execution.get("createdAt") or ""
+        updated = workflow.get("updatedAt") or ""
+        stale = bool(started and updated and updated > started)
     rd = execution["data"]["resultData"]
     failed_name = rd.get("lastNodeExecuted")
     nodes = {n["name"]: n for n in workflow["nodes"]}
@@ -334,6 +349,9 @@ def make_plan(execution, workflow, min_age=0, ex_id=None):
             note = f"조회상 없음, 하지만 늦게 반영되는 서비스라 {settle}초가 지나도 '안 써졌다'는 증거가 안 됨"
         else:
             note = None
+        if stale and status in ("다시 보내야 함", "확인 대기"):
+            status = "확인 불가"
+            note = "실행이 끝난 뒤 워크플로가 수정됨. 실행 당시 정의를 알 수 없어서, 지금 정의로 다시 보내는 건 추측이라 사람에게 넘김"
         plan.append({"index": i, "id": ident, "body": body, "status": status, "note": note, "lookup": found,
                      "key": f"{parsed.path.strip('/')}-{ident}"})
     return {"node": failed_name, "url": url, "method": p.get("method", "GET"), "field": field,

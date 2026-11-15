@@ -175,6 +175,45 @@ class RestartAfterSending(unittest.TestCase):
         self.assertEqual((r["sent"], self.sent), (0, []))
 
 
+    def test_workflow_edited_after_the_failure_is_not_trusted(self):
+        """sameday: 실패한 실행 뒤에 노드 주소를 바꾸면, 해결된 항목인데 새 주소로 재발송을 제안했다"""
+        ex = self._execution()
+        ex["id"] = "82"
+        ex["startedAt"] = "2026-11-14T00:00:00.000Z"
+        recover.REVIEW_DIR = Path(self.tmp.name) / "review"
+        plan = recover.make_plan(ex, self._workflow(), ex_id="82")
+        recover.write_review(plan, "82") if plan["plan"][0]["status"] == "확인 불가" else None
+        job = "82:http://x/email:customer20@example.com"
+        recover.claim(job); recover.mark(job, "sending")
+        plan = recover.make_plan(ex, self._workflow(), ex_id="82")
+        recover.write_review(plan, "82")
+        recover.resolve("82", "customer20@example.com", "skip")
+        edited = self._workflow()
+        edited["nodes"][0]["parameters"]["url"] = "http://x/email-v2"      # 실행 뒤 주소 변경
+        edited["updatedAt"] = "2026-11-15T09:00:00.000Z"
+        plan = recover.make_plan(ex, edited, ex_id="82")
+        x = plan["plan"][0]
+        self.assertEqual(x["status"], "확인 불가")                         # 다시 보내자고 하지 않음
+        self.assertIn("워크플로가 수정됨", x["note"])
+
+    def test_workflow_snapshot_from_the_execution_preserves_the_resolution(self):
+        """n8n 2.47.7+: 실행에 담긴 당시 정의(workflowData)를 쓰면 사람의 결정이 그대로 남는다"""
+        ex = self._execution()
+        ex["id"] = "83"
+        ex["workflowData"] = self._workflow()
+        recover.REVIEW_DIR = Path(self.tmp.name) / "review"
+        job = "83:http://x/email:customer20@example.com"
+        recover.claim(job); recover.mark(job, "sending")
+        plan = recover.make_plan(ex, {"nodes": [], "updatedAt": "2026-11-15T09:00:00.000Z"}, ex_id="83")
+        recover.write_review(plan, "83")
+        recover.resolve("83", "customer20@example.com", "sent")
+        edited = self._workflow()
+        edited["nodes"][0]["parameters"]["url"] = "http://x/email-v2"
+        edited["updatedAt"] = "2026-11-15T09:00:00.000Z"
+        plan = recover.make_plan(ex, edited, ex_id="83")                  # 지금 정의는 바뀌었지만
+        self.assertEqual(plan["plan"][0]["status"], "사람이 처리함")      # 스냅샷 덕에 결정이 유지됨
+        self.assertEqual(plan["url"], "http://x/email")
+
     def test_request_is_recorded_before_it_is_sent(self):
         """BorkoB 질문: 사람이 보는 건 ID뿐인가, 보내기 전 요청 그대로인가 → 보내기 전에 요청을 남긴다"""
         seen = {}
