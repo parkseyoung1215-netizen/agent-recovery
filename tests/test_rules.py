@@ -274,6 +274,35 @@ class RestartAfterSending(unittest.TestCase):
         with self.assertRaises(ValueError):
             recover.resolve("81", "x@example.com", "maybe")
 
+
+class ManufacturedLookup(unittest.TestCase):
+    """Packet_Exchange 제안: 조회 기능이 없어도, 서비스가 저장하는 칸에 항목 값을 넣어두면
+    목록·검색 기능으로 '이미 처리됐나'를 물어볼 수 있다."""
+
+    def ask(self, response, **svc):
+        orig = recover.http
+        recover.http = lambda *a, **k: (200, response)
+        try:
+            return recover.lookup({"lookup": "http://x/messages?ref={id}", **svc}, "order-7")
+        finally:
+            recover.http = orig
+
+    def test_non_empty_search_result_means_found(self):
+        self.assertIs(self.ask({"data": [{"ref": "order-7"}]}, exists="data", found_if="any"), True)
+
+    def test_empty_search_result_means_not_found(self):
+        self.assertIs(self.ask({"data": []}, exists="data", found_if="any"), False)
+
+    def test_non_list_answer_is_not_trusted(self):
+        self.assertIsNone(self.ask({"data": {}}, exists="data", found_if="any"))
+        self.assertIsNone(self.ask({"error": "x"}, exists="data", found_if="any"))
+
+    def test_fuzzy_search_only_counts_exact_matches(self):
+        res = {"data": [{"ref": "order-70"}, {"ref": "order-71"}]}
+        self.assertIs(self.ask(res, exists="data", found_if="any", match="ref"), False)
+        res["data"].append({"ref": "order-7"})
+        self.assertIs(self.ask(res, exists="data", found_if="any", match="ref"), True)
+
 class FakeShopIntegration(unittest.TestCase):
     """실험 7 상황: customer10은 503(안 써짐), customer20은 써졌지만 타임아웃, 조회는 8초 늦게 반영."""
 

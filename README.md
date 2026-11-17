@@ -142,6 +142,21 @@ Regression tests for the cases raised on the forum: malformed lookups, a lookup 
 
 Add `"idempotent_first_attempt": true` only if your workflow already sends the same Idempotency-Key on the first attempt. `{id}` becomes the item's value of `id_field`, `${NAME}` is read from `.env` (keep secrets out of this file), and `exists` is the path to a true/false value in the lookup's JSON. A service without a `lookup` is never re-sent automatically; its items go to a human.
 
+**No "was this processed?" endpoint? You can often make one** (suggested on the forum by Packet_Exchange). If the service stores any field you send (a client reference, tag, or metadata) and has a list or search endpoint, put the item's ID in that field when you send, then search by it:
+
+```json
+{
+  "lookup": "https://api.example.com/messages?reference={id}",
+  "exists": "data",
+  "found_if": "any",
+  "match": "reference"
+}
+```
+
+`found_if: "any"` means "found if the list at `exists` is not empty"; an empty list means not found, and anything that isn't a list is treated as unknown. `match` keeps only results whose field equals the ID exactly, for search endpoints that return near matches.
+
+`recover` exits with **3** when any item's outcome is still unconfirmed (waiting for the lookup to settle, handed to a person, no reply to a re-send) and **0** only when every item is confirmed. So a scheduled job can alert on the count of unconfirmed items rather than on n8n's green badge.
+
 `benchmark/` is an earlier simulation comparing three recovery strategies on 24 synthetic failure cases. I wrote the cases and the strategies myself, so its 24/24 score only shows the comparison set-up works; it is not evidence of real-world accuracy.
 
 ## Limitations (v0.1)

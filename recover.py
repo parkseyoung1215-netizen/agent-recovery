@@ -12,6 +12,8 @@ n8n 기본 Retry는 실패한 노드를 통째로 다시 실행해서,
   python3 recover.py <실행ID> --yes    # 확인 없이 바로 실행
   python3 recover.py --list            # 최근 실패한 실행 목록
 
+종료 코드: 0 = 모든 항목의 결과가 확인됨, 3 = 결과가 확인 안 된 항목이 남음 (사람 확인 필요)
+
 필요한 것: 같은 폴더의 .env 파일에  N8N_API_KEY=...  (n8n 설정 > n8n API에서 만든 읽기 전용 키)
 
 v0.1의 한계 (정직하게):
@@ -79,11 +81,24 @@ def lookup(svc, ident):
     code, res = http("GET", url, headers=headers)
     if code != 200:
         return None
-    value = res
-    for part in svc.get("exists", "exists").split("."):
-        value = value.get(part) if isinstance(value, dict) else None
+    value = _dig(res, svc.get("exists", "exists"))
+    if svc.get("found_if") == "any":
+        # 조회 기능이 없는 서비스라도 목록·검색 기능은 있는 경우 (Packet_Exchange 제안):
+        # 보낼 때 서비스가 저장하는 칸(참조번호·태그 등)에 항목 값을 넣어두고, 그걸로 검색한다.
+        if not isinstance(value, list):
+            return None                        # 목록이 아니면 판단하지 않음
+        if svc.get("match"):                   # 검색이 대충 맞는 것도 돌려주는 서비스면, 정확히 같은 것만 인정
+            value = [x for x in value if str(_dig(x, svc["match"])) == str(ident)]
+        return len(value) > 0
     # true/false가 아니면({}·"false"·null 등) 판단하지 않고 '확인 불가'로 둔다
     return value if isinstance(value, bool) else None
+
+
+def _dig(value, path):
+    for part in (path or "").split("."):
+        if part:
+            value = value.get(part) if isinstance(value, dict) else None
+    return value
 
 
 def load_api_key():
@@ -429,6 +444,7 @@ def run(todo, plan, ex_id):
         print(f"  {line}")
     print(f"\n보낸 요청: {r['sent']}건 성공, {r['failed']}건 응답 실패, {r['skipped_claimed']}건 건너뜀 (이미 잡힌 항목)")
     print("실제로 중복이 없는지는 상대 서비스의 기록으로 확인하세요. 이 도구는 보낸 횟수만 셀 수 있어요.")
+    return r
 
 
 def list_failed(key):
@@ -454,18 +470,24 @@ def main():
     if review:
         print(f"사람 확인용 기록: {review}")
         print(f"확인한 뒤 결정을 남기세요: python3 ar.py resolve {ex_id} <항목값> --sent (보냈음/도착 확인) 또는 --skip (안 보냄)")
+    # 실행 상태(초록불) 대신 '결과가 확인 안 된 항목 수'로 알린다 (Packet_Exchange 제안).
+    # 0이 아니면 종료 코드 3 → 예약 작업이나 CI가 알아챌 수 있음
+    unresolved = [x for x in plan["plan"] if x["status"] in ("확인 불가", "확인 대기")]
     if not todo:
-        rest = [x for x in plan["plan"] if x["status"] != "이미 처리됨"]
-        if rest:
-            print(f"\n지금 자동으로 다시 보낼 건 없어요. {len(rest)}건은 확인 대기 또는 사람 확인이 필요해요.")
+        if unresolved:
+            print(f"\n지금 자동으로 다시 보낼 건 없어요. {len(unresolved)}건은 결과가 확인되지 않았어요 (확인 대기 또는 사람 확인 필요).")
         else:
-            print("\n다시 보낼 게 없어요. 모든 항목이 이미 처리된 걸로 확인됐어요.")
-        return
+            print("\n다시 보낼 게 없어요. 모든 항목의 결과가 확인됐어요.")
+        sys.exit(3 if unresolved else 0)
     if "--yes" not in args:
         if input("\n위 계획대로 보낼까요? (y/n) ").strip().lower() != "y":
             print("취소했어요. 아무것도 보내지 않았어요.")
-            return
-    run(todo, plan, ex_id)
+            sys.exit(3)
+    r = run(todo, plan, ex_id)
+    left = len(unresolved) + r["failed"] + r["skipped_claimed"]   # 응답 실패·이미 잡힌 항목도 결과 미확인
+    if left:
+        print(f"\n결과가 확인되지 않은 항목: {left}건 (종료 코드 3)")
+    sys.exit(3 if left else 0)
 
 
 if __name__ == "__main__":
