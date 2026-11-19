@@ -303,6 +303,65 @@ class ManufacturedLookup(unittest.TestCase):
         res["data"].append({"ref": "order-7"})
         self.assertIs(self.ask(res, exists="data", found_if="any", match="ref"), True)
 
+
+class NoSecretsInRecords(unittest.TestCase):
+    """Shem_Losdoc 질문: 확인 파일은 실패를 조사하며 남에게 공유될 수 있다. 비밀이 남으면 안 된다."""
+    SECRET_URL = "https://script.google.com/macros/s/AKfycbSECRETdeployment123/exec"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.saved = (recover.STATE_DIR, recover.REVIEW_DIR, recover.read_env_file, recover.http)
+        recover.STATE_DIR = Path(self.tmp.name) / "claims"
+        recover.REVIEW_DIR = Path(self.tmp.name) / "review"
+        recover.read_env_file = lambda: {"SHEETS_URL": self.SECRET_URL, "MAIL_TOKEN": "tok_live_abcdef"}
+        # 조회: '없음'(strong) → 다시 보냄 → 응답 없음 → 기록이 'unknown'으로 남아 사람에게
+        recover.http = lambda method, *a, **k: (200, {"found": False}) if method == "GET" else (504, None)
+        self.addCleanup(self.restore)
+
+    def restore(self):
+        recover.STATE_DIR, recover.REVIEW_DIR, recover.read_env_file, recover.http = self.saved
+
+    def plan(self, url):
+        items = [{"json": {"order_id": "o-1", "to": "c1@x.com", "api_token": "tok_live_abcdef", "password": "hunter22"}}]
+        ex = {"id": "90", "stoppedAt": "2000-01-01T00:00:00Z", "data": {"resultData": {
+            "lastNodeExecuted": "send", "error": {"message": f"timeout calling {url}"},
+            "runData": {"src": [{"data": {"main": [items]}}], "send": [{"source": [{"previousNode": "src"}]}]}}}}
+        wf = {"nodes": [{"name": "send", "type": "n8n-nodes-base.httpRequest", "parameters": {"method": "POST", "url": url,
+              "jsonBody": "={{ JSON.stringify({ order_id: $json.order_id, to: $json.to, api_token: $json.api_token, password: $json.password }) }}"}}], "connections": {}}
+        return recover.make_plan(ex, wf, ex_id="90")
+
+    def everything_written(self):
+        return "\n".join(p.name + "\n" + p.read_text() for p in Path(self.tmp.name).rglob("*") if p.is_file())
+
+    def test_secret_url_body_fields_and_error_never_reach_disk(self):
+        url = self.SECRET_URL + "?api_key=k_123456789&lang=ko"
+        plan = self.plan(url)
+        recover.send_items([x for x in plan["plan"] if x["status"] == "다시 보내야 함"], plan, "90")
+        plan = self.plan(url)
+        recover.write_review(plan, "90")
+        dump = self.everything_written()
+        for secret in ("AKfycbSECRETdeployment123", "k_123456789", "tok_live_abcdef", "hunter22"):
+            self.assertNotIn(secret, dump)                    # 파일 이름까지 포함해서 어디에도 없음
+        self.assertIn("${SHEETS_URL}", dump)                 # 어느 설정의 주소였는지는 알 수 있음
+        self.assertIn("lang=ko", dump)                       # 비밀이 아닌 값은 그대로
+        self.assertIn("c1@x.com", dump)
+        self.assertIn("Idempotency-Key", dump)               # 중복 방지 키는 비밀이 아님
+
+    def test_resolve_still_finds_the_record(self):
+        plan = self.plan(self.SECRET_URL)
+        recover.send_items([x for x in plan["plan"] if x["status"] == "다시 보내야 함"], plan, "90")
+        plan = self.plan(self.SECRET_URL)
+        recover.write_review(plan, "90")
+        recover.resolve("90", "o-1", "sent")
+        self.assertEqual(self.plan(self.SECRET_URL)["plan"][0]["status"], "사람이 처리함")
+
+    def test_secret_name_rules(self):
+        for name in ("Authorization", "X-API-Key", "api_key", "access_token", "client_secret", "Cookie", "password"):
+            self.assertTrue(recover._is_secret_name(name), name)
+        for name in ("Idempotency-Key", "to", "order_id", "author", "amount", "Content-Type"):
+            self.assertFalse(recover._is_secret_name(name), name)
+
 class FakeShopIntegration(unittest.TestCase):
     """실험 7 상황: customer10은 503(안 써짐), customer20은 써졌지만 타임아웃, 조회는 8초 늦게 반영."""
 

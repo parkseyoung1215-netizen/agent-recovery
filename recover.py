@@ -22,6 +22,7 @@ v0.1의 한계 (정직하게):
   - 실패한 노드 다음에 이어지는 노드가 있으면 실행하지 않고 알려주기만 해요.
   - 요청 본문은 {{ JSON.stringify({ 키: $json.필드, 키: $('노드').item.json.필드 }) }} 형태만 이해해요.
 """
+import hashlib
 import json
 import os
 import re
@@ -70,6 +71,75 @@ def read_env_file():
                 k, v = line.split("=", 1)
                 out[k.strip()] = v.strip()
     return out
+
+
+# ---------------- 기록에 비밀이 남지 않게 ----------------
+# 확인 파일과 기록 파일은 실패를 조사하면서 남에게 공유될 수 있다 (Shem_Losdoc 지적).
+# 그래서 쓰기 전에: .env에 있는 비밀 값은 ${이름}으로 바꾸고, 이름이 비밀처럼 보이는
+# 헤더·주소 파라미터·본문 필드는 값을 [redacted]로 바꾼다. 중복 방지 키는 비밀이 아니라 남긴다.
+REDACTED = "[redacted]"
+_SECRET_NAMES = {"password", "passwd", "pass", "secret", "token", "auth", "authorization",
+                 "proxy_authorization", "cookie", "set_cookie", "session", "credential", "credentials",
+                 "api_key", "apikey", "x_api_key", "access_key", "secret_key", "private_key",
+                 "client_secret", "access_token", "refresh_token", "id_token", "bearer",
+                 "signature", "sig", "key"}
+
+
+def _is_secret_name(name):
+    n = re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
+    if n == "idempotency_key":
+        return False
+    return n in _SECRET_NAMES or n.endswith(("_token", "_secret", "_password", "_api_key", "_apikey"))
+
+
+def _env_secrets():
+    """.env에 적힌 값들 (긴 값부터, 짧은 값은 흔한 문자열과 겹칠 수 있어 6자 이상만)"""
+    vals = {}
+    for k, v in read_env_file().items():
+        v = os.environ.get(k) or v
+        if v and len(v) >= 6:
+            vals[v] = k
+    return sorted(vals.items(), key=lambda kv: -len(kv[0]))
+
+
+def _replace_env_values(text):
+    text = str(text)
+    for value, name in _env_secrets():
+        text = text.replace(value, "${" + name + "}")
+    return text
+
+
+def redact_text(text):
+    """자유 문장(에러 메시지 등): .env 값을 지우고, 안에 든 주소의 비밀 파라미터와 'token=...' 같은 쌍도 지움"""
+    text = _replace_env_values(text)
+    text = re.sub(r"https?://[^\s\"'<>]+", lambda m: redact_url(m.group(0)), text)
+    return re.sub(r"\b([A-Za-z_][\w-]*)(\s*[=:]\s*)([^\s&,;\"']+)",
+                  lambda m: m.group(1) + m.group(2) + REDACTED if _is_secret_name(m.group(1)) else m.group(0), text)
+
+
+def redact_url(url):
+    url = _replace_env_values(url)
+    parts = urllib.parse.urlsplit(url)
+    if not parts.query:
+        return url
+    q = [(k, REDACTED if _is_secret_name(k) else v)
+         for k, v in urllib.parse.parse_qsl(parts.query, keep_blank_values=True)]
+    return urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(q, safe="${}[]")))
+
+
+def redact(obj):
+    if isinstance(obj, dict):
+        return {k: (REDACTED if _is_secret_name(k) else redact(v)) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [redact(v) for v in obj]
+    if isinstance(obj, str):
+        return redact_text(obj)
+    return obj
+
+
+def job_key(ex_id, url, ident):
+    """기록 파일 이름에도 주소가 들어가므로, 비밀을 지운 주소로 만든다"""
+    return f"{ex_id}:{redact_url(url)}:{ident}"
 
 
 def lookup(svc, ident):
@@ -259,8 +329,8 @@ def resolve(ex_id, ident, decision, note="", who=None):
     items = {str(x["id"]): x for x in json.loads(review.read_text())}
     if str(ident) not in items:
         raise KeyError(f"확인 파일에 {ident}가 없어요. 있는 항목: {', '.join(items)}")
-    url = items[str(ident)]["first_attempt_request"]["url"]
-    job = f"{ex_id}:{url}:{ident}"
+    rec = items[str(ident)]
+    job = rec.get("job") or job_key(ex_id, rec["first_attempt_request"]["url"], ident)   # 예전 확인 파일 호환
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     claim(job, worker="human")                  # 기록이 없으면 만든다 (이미 있으면 그대로 둠)
     mark(job, "resolved", resolution={
@@ -278,15 +348,15 @@ def send_items(todo, plan, ex_id, worker="cli"):
     """잡기 → 'sending' 기록 → 보내기 → 결과 기록. 실제로 보낸 건수를 정직하게 돌려준다."""
     result = {"sent": 0, "failed": 0, "skipped_claimed": 0, "lines": []}
     for x in todo:
-        job = f"{ex_id}:{plan['url']}:{x['id']}"
+        job = job_key(ex_id, plan['url'], x['id'])
         if not claim(job, worker):
             result["skipped_claimed"] += 1
             result["lines"].append(f"{x['id']}: 다른 작업자가 이미 잡았거나 처리 기록이 있음 ({claim_state(job)}) → 건너뜀")
             continue
         headers = {"Content-Type": "application/json", "Idempotency-Key": x["key"]}
         # 보내기 '전에' 실제로 보낼 요청을 그대로 남긴다 (멈췄을 때 사람이 볼 것)
-        mark(job, "sending", request={"method": plan["method"], "url": plan["url"],
-                                      "headers": headers, "body": x["body"]},
+        mark(job, "sending", request={"method": plan["method"], "url": redact_url(plan["url"]),
+                                      "headers": redact(headers), "body": redact(x["body"])},
              sending_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
         code, _ = http(plan["method"], plan["url"], body=x["body"], headers={"Idempotency-Key": x["key"]})
         if isinstance(code, int) and 200 <= code < 300:
@@ -349,7 +419,7 @@ def make_plan(execution, workflow, min_age=0, ex_id=None):
         status = decide(failure, found, age, lookup_mode=mode, settle=settle,
                         keyed_first_attempt=bool(svc.get("idempotent_first_attempt")))
         # 이전 복구 시도의 기록이 남아 있으면(예: 'sending'에서 멈춤) 다시 보내지 않고 사람에게
-        rec = claim_record(f"{ex_id or execution.get('id')}:{url}:{ident}")
+        rec = claim_record(job_key(ex_id or execution.get('id'), url, ident))
         prior = rec.get("state") if rec else None
         if prior == "resolved":
             r = rec.get("resolution", {})
@@ -368,7 +438,7 @@ def make_plan(execution, workflow, min_age=0, ex_id=None):
             status = "확인 불가"
             note = "실행이 끝난 뒤 워크플로가 수정됨. 실행 당시 정의를 알 수 없어서, 지금 정의로 다시 보내는 건 추측이라 사람에게 넘김"
         plan.append({"index": i, "id": ident, "body": body, "status": status, "note": note, "lookup": found,
-                     "key": f"{parsed.path.strip('/')}-{ident}"})
+                     "key": f"ar-{hashlib.sha256((parsed.netloc + parsed.path).encode()).hexdigest()[:12]}-{ident}"})
     return {"node": failed_name, "url": url, "method": p.get("method", "GET"), "field": field,
             "service": svc, "settle": settle,
             "error": (rd.get("error") or {}).get("message"), "plan": plan, "downstream": downstream}
@@ -390,15 +460,16 @@ def write_review(plan, ex_id):
     REVIEW_DIR.mkdir(parents=True, exist_ok=True)
     out = []
     for x in items:
-        job = f"{ex_id}:{plan['url']}:{x['id']}"
+        job = job_key(ex_id, plan['url'], x['id'])
         p = _claim_path(job)
         out.append({
             "id_field": plan["field"], "id": x["id"],
             "why_not_sent": x.get("note"),
             "lookup_answer": x.get("lookup"),
-            "n8n_error": plan["error"],
+            "n8n_error": redact_text(plan["error"]),
+            "job": job,
             "first_attempt_request": {
-                "method": plan["method"], "url": plan["url"], "body": x["body"],
+                "method": plan["method"], "url": redact_url(plan["url"]), "body": redact(x["body"]),
                 "source": "n8n이 저장하지 않아서 실행 기록으로 다시 만든 것 (보낸 바이트 그대로가 아님)",
             },
             "recovery_attempt": json.loads(p.read_text()) if p.exists() else None,
